@@ -611,9 +611,9 @@ int wmFSPBWT<Syllable>::makePanel() // fuzzy way :overall
         for (int i = 0; i < M; i++) {
             int num = 0;
             if (B == 64) {
-                num = __builtin_popcountll(X[i][k]);
+                num = __builtin_popcountll(X[i][k] | filter[k]);
             } else if (B == 128) {
-                num = countSetBits128(X[i][k]);
+                num = countSetBits128(X[i][k] | filter[k]);
             }
             uint32_t temp = num % T;
             fuzzyX[i][index] = (fuzzyX[i][index] << FF) | temp;
