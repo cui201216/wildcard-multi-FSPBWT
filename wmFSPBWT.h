@@ -192,6 +192,8 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
         std::iota(array[0].begin(), array[0].end(), 0);
         divergence.resize(n + 1, std::vector<int>(M, 0));
         u = new int[(unsigned long)n * M * T];
+        filter.resize(n);
+        panelSyllableHavingMissing.resize(M,vector<bool>(n));
     } catch (const std::bad_alloc& e) {
         std::cerr << "内存分配失败: " << e.what() << std::endl;
         return -1;
@@ -202,6 +204,11 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
     in.seekg(0);
     std::vector<Syllable> X_(M, 0);
     std::vector<std::vector<std::pair<uint8_t, uint8_t>>> syllableMultis(M); // 临时存储多字符位点
+
+    Syllable filterTemp=0;
+    vector<Syllable> missingTemp;
+    missingTemp.resize(M);
+    Syllable one=1;
 
     int K = 0, k = 0;
     while (std::getline(in, line)) {
@@ -235,7 +242,23 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
                     panelMultiInfo[i][k] = std::make_pair(-1, 0);
                 }
             }
+
+            filter[k]=filterTemp;
+            if (filterTemp!=0)
+            {
+                //having missing
+                for (int i = 0; i < M; i++)
+                {
+                    if (panelSyllableHavingMissing[i][k]==true)
+                    {
+                        // add missing <i,k> , missingTemp[i]
+                        panelMissingData[{i, k}] = missingTemp[i];
+                    }
+                }
+            }
             X_.assign(M, 0); // 重置X_
+            missingTemp.assign(M,0);
+            filterTemp=0;
         }
 
         std::stringstream ss(line);
@@ -272,10 +295,20 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
                 std::cerr << "无效字符 '.' 在 K=" << K << ", index=" << index << std::endl;
                 return 7;
             } else {
-                std::cerr << "无效字符 '" << c << "' 在 K=" << K << ", index=" << index << std::endl;
-                return 8;
+                X_[index] = (X_[index] << 1)|  1 ; // 缺失值位点记为1
+                missingTemp[index]=missingTemp[index]|(one << ( B-1 - K%B) );
+                panelSyllableHavingMissing[index][K/B]=true;
+                filterTemp=filterTemp|(one<<( B-1 - K%B) );
+                // // ---- 调试输出 ----
+                // std::cerr << "[DEBUG] "
+                //           << "i=" << index                // 样本编号
+                //           << "  k=" << K/B              // 音节编号
+                //           << "  K=" << K                  // 全局位点编号
+                //           << "  K%B=" << K % B
+                //           << "  bit-pos=" << (B - 1 - K % B)
+                //           << std::endl;
             }
-            panelCount[c - '0'] += 1;
+            //panelCount[c - '0'] += 1;
             index++;
         }
         if (index != M) {
@@ -303,6 +336,10 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
                     syllableMultis[i].clear();
                 } else {
                     panelMultiInfo[i][k] = std::make_pair(-1, 0);
+                }
+                filter[k]=filterTemp;
+                if (panelSyllableHavingMissing[i][k]==true) {
+                    panelMissingData[{i, k}] = (missingTemp[i] << pad2);
                 }
             }
         }
