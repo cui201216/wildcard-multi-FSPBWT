@@ -270,6 +270,20 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
         std::getline(ss, token, '\t'); // Get haplotype data
 
         if (token.size() != M) {
+            // ============== 新增调试代码开始 ==============
+            std::cerr << "=========== DEBUG INFO ===========" << std::endl;
+            std::cerr << "出错位置 (K): " << K << std::endl;
+            std::cerr << "完整行内容: [" << line << "]" << std::endl;
+            std::cerr << "提取的Token: [" << token << "]" << std::endl;
+            std::cerr << "Token长度: " << token.size() << " (ASCI码: ";
+            // 打印每个字符的ASCII码，防止有肉眼不可见的控制字符
+            for(char c : token) {
+                std::cerr << (int)c << " ";
+            }
+            std::cerr << ")" << std::endl;
+            std::cerr << "==================================" << std::endl;
+            // ============== 新增调试代码结束 ==============
+
             std::cerr << "单倍型数据长度不匹配: 预期 " << M << ", 实际 " << token.size() << ", K=" << K << std::endl;
             return 6;
         }
@@ -292,9 +306,6 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
                 X_[index] = (X_[index] << 1) | 1; // 多字符位点记为1
                 syllableMultis[index].push_back(std::make_pair(static_cast<uint8_t>(K % B), static_cast<uint8_t>(c - '0')));
             } else if (c == '.') {
-                std::cerr << "无效字符 '.' 在 K=" << K << ", index=" << index << std::endl;
-                return 7;
-            } else {
                 X_[index] = (X_[index] << 1)|  1 ; // 缺失值位点记为1
                 missingTemp[index]=missingTemp[index]|(one << ( B-1 - K%B) );
                 panelSyllableHavingMissing[index][K/B]=true;
@@ -307,6 +318,10 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
                 //           << "  K%B=" << K % B
                 //           << "  bit-pos=" << (B - 1 - K % B)
                 //           << std::endl;
+
+            } else {
+                std::cerr << "无效字符在 K=" << K << ", index=" << index << std::endl;
+                return 7;
             }
             //panelCount[c - '0'] += 1;
             index++;
