@@ -82,6 +82,11 @@ struct wmFSPBWT {
     u_long queryCount[10]={0};
 
 
+    vector<Syllable> filter;
+    vector<vector<bool>> panelSyllableHavingMissing;
+    vector<vector<bool>> querySyllableHavingMissing;
+    std::unordered_map<std::pair<int,int>, Syllable> panelMissingData;
+    std::unordered_map<std::pair<int,int>, Syllable> queryMissingData;
     int readMacsPanel(string txt_file);
 
     int readMacsQuery(string txt_file);
