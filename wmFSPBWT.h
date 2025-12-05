@@ -1524,168 +1524,156 @@ right_done:
         matchLen += (end - start);
     }
 }
+
 template<class Syllable>
 void wmFSPBWT<Syllable>::outPanelRefine(int L, int s_idx, int e_idx, int index_panel, int index_query,
-                                          std::ofstream &out) {
-    bool startDone=false;
-    bool endDone=false;
-    int start = 0, end = 0;
-    if (s_idx == -1) {
-        start = 0;
-        startDone = true;
-    } else {
-        if (panelMultiInfo[index_panel][s_idx].second == 0 && queryMultiInfo[index_query][s_idx].second == 0) {
-            unsigned long tz;
-            if (B == 64) {
-                tz = __builtin_ctzll(X[index_panel][s_idx] ^ Z[index_query][s_idx]);
-            } else if (B == 128) {
-                tz = ctz128_uint128(X[index_panel][s_idx] ^ Z[index_query][s_idx]);
-            }
-            start = (s_idx + 1) * B - tz;
-            startDone = true;
-        } else if (panelMultiInfo[index_panel][s_idx].second > 0 && queryMultiInfo[index_query][s_idx].second > 0) {
-            auto info_a = panelMultiInfo[index_panel][s_idx];
-            auto info_b = queryMultiInfo[index_query][s_idx];
-            if (info_a.second == info_b.second) {
-                bool equal = true;
-                for (unsigned int i = 0; i < info_a.second; i++) {
-                    if (panelMultiValues[info_a.first + i] != queryMultiValues[info_b.first + i]) {
-                        equal = false;
-                        break;
-                    }
-                }
-                if (equal) {
-                    unsigned long tz;
-                    if (B == 64) {
-                        tz = __builtin_ctzll(X[index_panel][s_idx] ^ Z[index_query][s_idx]);
-                    } else if (B == 128) {
-                        tz = ctz128_uint128(X[index_panel][s_idx] ^ Z[index_query][s_idx]);
-                    }
-                    start = (s_idx + 1) * B - tz;
-                    startDone = true;
-                }
-            }
-        }
-        if (startDone==false)
-        {
-            auto info_a = panelMultiInfo[index_panel][s_idx];
-            auto info_b = queryMultiInfo[index_query][s_idx];
-            // 构建音节的位点序列
-            std::vector<char> seq_a(B, '0'), seq_b(B, '0');
-            // 填充二进制位点
-            for (int j = 0; j < B; ++j) {
-                seq_a[j] = ((X[index_panel][s_idx] >> (B - 1 - j)) & 1) ? '1' : '0';
-                seq_b[j] = ((Z[index_query][s_idx] >> (B - 1 - j)) & 1) ? '1' : '0';
-            }
-            // 填充多字符位点
-            if (info_a.second > 0) {
-                for (unsigned int i = 0; i < info_a.second; ++i) {
-                    int pos = panelMultiValues[info_a.first + i].first;
-                    char val = '0' + panelMultiValues[info_a.first + i].second;
-                    seq_a[pos] = val;
-                }
-            }
-            if (info_b.second > 0) {
-                for (unsigned int i = 0; i < info_b.second; ++i) {
-                    int pos = queryMultiValues[info_b.first + i].first;
-                    char val = '0' + queryMultiValues[info_b.first + i].second;
-                    seq_b[pos] = val;
-                }
-            }
-            // 从音节末尾向前比较
-            int tz = 0;
-            for (int j = B - 1; j >= 0; --j) {
-                if (seq_a[j] != seq_b[j]) {
-                    break;
-                }
-                ++tz;
-            }
-            start = (s_idx + 1) * B - tz;
-            startDone = true;
-        }
+                                         std::ofstream &out)
+{
+    // ==================== 调试信息（可删）===================
+    std::cerr << "\n CALL outPanelRefine:\n";
+    std::cerr << "  PanelHap" << index_panel << " vs QueryHap" << index_query << " L=" << L << "\n";
+    std::cerr << "  连续匹配段: k=[" << (s_idx + 1) << ", " << e_idx << "]\n";
+    // ===============================================
 
+    int seg_start = (s_idx + 1) * B;
+    int seg_end   = (e_idx + 1) * B - 1;
+    if (seg_end >= N) seg_end = N - 1;
+
+    int start = seg_start;
+    int end   = seg_end + 1;  // 开区间
+
+    // ==========================================
+    // 1. 向左延伸（只在 s_idx >= 0 时）
+    // ==========================================
+    if (s_idx >= 0) {
+        int left_block = s_idx;
+
+        Syllable missP = panelMissingData.count({index_panel, left_block})
+                         ? panelMissingData[{index_panel, left_block}] : 0;
+        Syllable missQ = queryMissingData.count({index_query, left_block})
+                         ? queryMissingData[{index_query, left_block}] : 0;
+
+        auto info_p = panelMultiInfo[index_panel][left_block];
+        auto info_q = queryMultiInfo[index_query][left_block];
+
+        int j = B - 1;
+        for (; j >= 0; --j) {
+            int global_pos = left_block * B + j;
+            if (global_pos < 0) break;
+
+            int bit_shift = B - 1 - j;
+            Syllable bitMask = (Syllable)1 << bit_shift;
+
+            if ((missP & bitMask) || (missQ & bitMask)) {
+                continue;  // . 通配
+            }
+
+            int val_p = (X[index_panel][left_block] >> bit_shift) & 1;
+            int val_q = (Z[index_query][left_block] >> bit_shift) & 1;
+            if (val_p != val_q) break;
+
+            if (val_p == 1) {
+                int real_p = 1, real_q = 1;
+
+                if (info_p.second > 0) {
+                    for (unsigned int k = 0; k < info_p.second; ++k) {
+                        if (panelMultiValues[info_p.first + k].first == (unsigned int)j) {
+                            real_p = panelMultiValues[info_p.first + k].second;
+                            break;
+                        }
+                    }
+                }
+                if (info_q.second > 0) {
+                    for (unsigned int k = 0; k < info_q.second; ++k) {
+                        if (queryMultiValues[info_q.first + k].first == (unsigned int)j) {
+                            real_q = queryMultiValues[info_q.first + k].second;
+                            break;
+                        }
+                    }
+                }
+                if (real_p != real_q) break;
+            }
+        }
+        start = left_block * B + (j + 1);  // 开区间
     }
 
-    if (e_idx == n) {
-        end = N;
-        endDone = true;
-    } else {
-        if (panelMultiInfo[index_panel][e_idx].second == 0 && queryMultiInfo[index_query][e_idx].second == 0) {
-            unsigned long tz = 0;
-            if (B == 64) {
-                tz = __builtin_clzll(X[index_panel][e_idx] ^ Z[index_query][e_idx]);
-            } else if (B == 128) {
-                tz = clz128_uint128(X[index_panel][e_idx] ^ Z[index_query][e_idx]);
-            }
-            end = e_idx * B + tz;
-            endDone=true;
-        } else if (panelMultiInfo[index_panel][e_idx].second > 0 && queryMultiInfo[index_query][e_idx].second > 0) {
-            auto info_a = panelMultiInfo[index_panel][e_idx];
-            auto info_b = queryMultiInfo[index_query][e_idx];
-            if (info_a.second == info_b.second) {
-                bool equal = true;
-                for (unsigned int i = 0; i < info_a.second; i++) {
-                    if (panelMultiValues[info_a.first + i] != queryMultiValues[info_b.first + i]) {
-                        equal = false;
-                        break;
-                    }
-                }
-                if (equal) {
-                    unsigned long tz = 0;
-                    if (B == 64) {
-                        tz = __builtin_clzll(X[index_panel][e_idx] ^ Z[index_query][e_idx]);
-                    } else if (B == 128) {
-                        tz = clz128_uint128(X[index_panel][e_idx] ^ Z[index_query][e_idx]);
-                    }
-                    end = e_idx * B + tz;
-                    endDone=true;
-                }
-            }
-        }
-        if (endDone==false)
-        {
-            auto info_a = panelMultiInfo[index_panel][e_idx];
-            auto info_b = queryMultiInfo[index_query][e_idx];
-            std::vector<char> seq_a(B, '0'), seq_b(B, '0');
-            for (int j = 0; j < B; ++j) {
-                seq_a[j] = ((X[index_panel][e_idx] >> (B - 1 - j)) & 1) ? '1' : '0';
-                seq_b[j] = ((Z[index_query][e_idx] >> (B - 1 - j)) & 1) ? '1' : '0';
-            }
-            if (info_a.second > 0) {
-                for (unsigned int i = 0; i < info_a.second; ++i) {
-                    int pos = panelMultiValues[info_a.first + i].first;
-                    char val = '0' + panelMultiValues[info_a.first + i].second;
-                    seq_a[pos] = val;
-                }
-            }
-            if (info_b.second > 0) {
-                for (unsigned int i = 0; i < info_b.second; ++i) {
-                    int pos = queryMultiValues[info_b.first + i].first;
-                    char val = '0' + queryMultiValues[info_b.first + i].second;
-                    seq_b[pos] = val;
-                }
-            }
-            // 从音节开头向后比较
-            int prefix = 0;
-            for (int j = 0; j < B; ++j) {
-                if (seq_a[j] != seq_b[j]) {
-                    break;
-                }
-                ++prefix;
-            }
-            end = e_idx * B + prefix;
-            endDone=true;
-        }
-    }
+    // ==========================================
+    // 2. 向右延伸（从 e_idx 开始！必须包含 e_idx 块的前缀）
+    // ==========================================
+    for (int curr_block = e_idx; curr_block < n; ++curr_block) {
+        Syllable missP = panelMissingData.count({index_panel, curr_block})
+                         ? panelMissingData[{index_panel, curr_block}] : 0;
+        Syllable missQ = queryMissingData.count({index_query, curr_block})
+                         ? queryMissingData[{index_query, curr_block}] : 0;
 
+        auto info_p = panelMultiInfo[index_panel][curr_block];
+        auto info_q = queryMultiInfo[index_query][curr_block];
+
+        int j = 0;
+        for (; j < B; ++j) {
+            int global_pos = curr_block * B + j;
+            if (global_pos >= N) {
+                end = N;
+                goto right_done;
+            }
+
+            int bit_shift = B - 1 - j;
+            Syllable bitMask = (Syllable)1 << bit_shift;
+
+            if ((missP & bitMask) || (missQ & bitMask)) {
+                continue;
+            }
+
+            int val_p = (X[index_panel][curr_block] >> bit_shift) & 1;
+            int val_q = (Z[index_query][curr_block] >> bit_shift) & 1;
+            if (val_p != val_q) {
+                end = global_pos;
+                goto right_done;
+            }
+
+            if (val_p == 1) {
+                int real_p = 1, real_q = 1;
+                if (info_p.second > 0) {
+                    for (unsigned int k = 0; k < info_p.second; ++k) {
+                        if (panelMultiValues[info_p.first + k].first == (unsigned int)j) {
+                            real_p = panelMultiValues[info_p.first + k].second;
+                            break;
+                        }
+                    }
+                }
+                if (info_q.second > 0) {
+                    for (unsigned int k = 0; k < info_q.second; ++k) {
+                        if (queryMultiValues[info_q.first + k].first == (unsigned int)j) {
+                            real_q = queryMultiValues[info_q.first + k].second;
+                            break;
+                        }
+                    }
+                }
+                if (real_p != real_q) {
+                    end = global_pos;
+                    goto right_done;
+                }
+            }
+        }
+        end = (curr_block + 1) * B;
+    }
+    end = N;
+
+right_done:
+    if (end > N) end = N;
+
+    // ==========================================
+    // 3. 输出
+    // ==========================================
     if (end - start >= L) {
-        out << IDs[index_panel] << '\t' << qIDs[index_query] << '\t' << start << '\t'
-            << end-1 << '\n';
+        std::cerr << "  → 输出匹配 [" << start << ", " << (end-1) << "] 长度=" << (end-start) << "\n";
+        out << IDs[index_panel] << '\t'
+            << qIDs[index_query] << '\t'
+            << start << '\t' << (end - 1) << '\n';
         ++outPanelMatchNum;
         matchLen += (end - start);
     }
 }
-
 
 template<class Syllable>
 void wmFSPBWT<Syllable>::inPanelIdentification(int L, int s_idx, int e_idx, int index_a,
