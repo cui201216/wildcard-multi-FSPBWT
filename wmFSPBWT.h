@@ -354,7 +354,7 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
                 }
                 filter[k]=filterTemp;
                 if (panelSyllableHavingMissing[i][k]==true) {
-                    panelMissingData[{i, k}] = (missingTemp[i] << pad2);
+                    panelMissingData[{i, k}] = missingTemp[i] ;
                 }
             }
         }
@@ -385,7 +385,7 @@ int wmFSPBWT<Syllable>::readMacsQuery(string query_file) {
 
     std::string line;
 
-    // Step 1: 计算单倍型数 (M)
+    // Step 1: 计算单倍型数 (Q)
     Q = 0;
     bool found_site = false;
     while (std::getline(in, line)) {
@@ -438,7 +438,8 @@ int wmFSPBWT<Syllable>::readMacsQuery(string query_file) {
     try {
         Z.resize(Q, std::vector<Syllable>(n));
         queryMultiInfo.resize(Q, std::vector<std::pair<unsigned int, uint8_t>>(n, std::make_pair(-1, 0)));
-        //queryMultiValues.reserve(Q*n*0.01);
+
+        querySyllableHavingMissing.resize(Q,vector<bool>(n));
     } catch (const std::bad_alloc& e) {
         std::cerr << "内存分配失败: " << e.what() << std::endl;
         return -1;
@@ -447,9 +448,11 @@ int wmFSPBWT<Syllable>::readMacsQuery(string query_file) {
     // Step 5: 处理SITE行
     in.clear();
     in.seekg(0);
-    std::vector<Syllable> Z_(M, 0);
+    std::vector<Syllable> Z_(Q, 0);
     std::vector<std::vector<std::pair<uint8_t, uint8_t>>> syllableMultis(Q); // 临时存储多字符位点
-
+    //Syllable filterTemp = 0;
+    std::vector<Syllable> missingTemp(Q, 0);  // 新增：query 的 missing 掩码
+    Syllable one = 1;
     int K = 0, k = 0;
     while (std::getline(in, line)) {
         if (line.rfind("SITE:", 0) != 0) {
@@ -481,8 +484,14 @@ int wmFSPBWT<Syllable>::readMacsQuery(string query_file) {
                 } else {
                     queryMultiInfo[i][k] = std::make_pair(-1, 0);
                 }
+
+                if (missingTemp[i]!=0)
+                {
+                    queryMissingData[{i,k}]=missingTemp[i];
+                }
             }
             Z_.assign(M, 0); // 重置X_
+            missingTemp.assign(Q, 0);
         }
 
         std::stringstream ss(line);
@@ -512,13 +521,14 @@ int wmFSPBWT<Syllable>::readMacsQuery(string query_file) {
                 Z_[index] = (Z_[index] << 1) | 1; // 多字符位点记为1
                 syllableMultis[index].push_back(std::make_pair(static_cast<uint8_t>(K % B), static_cast<uint8_t>(c - '0')));
             } else if (c == '.') {
-                std::cerr << "无效字符 '.' 在 K=" << K << ", index=" << index << std::endl;
-                return 7;
+                Z_[index] = (Z_[index] << 1) | 1;
+                missingTemp[index] |= (one << (B - 1 - K % B));  // 记录 query missing
+                querySyllableHavingMissing[index][K/B]=true;
             } else {
                 std::cerr << "无效字符 '" << c << "' 在 K=" << K << ", index=" << index << std::endl;
                 return 8;
             }
-            queryCount[c - '0'] += 1;
+            //queryCount[c - '0'] += 1;
             index++;
         }
         if (index != Q) {
@@ -533,7 +543,7 @@ int wmFSPBWT<Syllable>::readMacsQuery(string query_file) {
 
             for (int i = 0; i < Q; i++) {
                 Z_[i] <<= pad2; // 填充0
-                X[i][k] = Z_[i];
+                Z[i][k] = Z_[i];
                 if (!syllableMultis[i].empty()) {
                     unsigned int start = queryMultiValues.size();
                     for (const auto& p : syllableMultis[i]) {
@@ -543,6 +553,9 @@ int wmFSPBWT<Syllable>::readMacsQuery(string query_file) {
                     syllableMultis[i].clear();
                 } else {
                     queryMultiInfo[i][k] = std::make_pair(-1, 0);
+                }
+                if (querySyllableHavingMissing[i][k]==true) {
+                    queryMissingData[{i, k}] = missingTemp[i] ;
                 }
             }
         }
