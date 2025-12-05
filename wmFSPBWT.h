@@ -223,6 +223,11 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
 
         // 处理音节边界
         if (K % B == 0 && K != 0) {
+            // --- 陷阱：检查 K=256 时 Sample 1 的状态 ---
+            if (K == 256) {
+                std::cerr << "\n[TRAP K=256] Before Clear: missingTemp[1] = " << missingTemp[1] << std::endl;
+            }
+            // ----------------------------------------
             k = K / B - 1; // 上一个音节的索引
             if (k >= n) {
                 std::cerr << "无效的k: " << k << ", n=" << n << std::endl;
@@ -259,6 +264,15 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file) {
             X_.assign(M, 0); // 重置X_
             missingTemp.assign(M,0);
             filterTemp=0;
+            // --- 陷阱：检查清零是否成功 ---
+            if (K == 256) {
+                std::cerr << "[TRAP K=256] After Clear:  missingTemp[1] = " << missingTemp[1] << std::endl;
+                if (missingTemp[1] != 0) {
+                    std::cerr << "FATAL: CLEAR FAILED!" << std::endl;
+                    exit(1);
+                }
+            }
+            // ----------------------------------------
         }
 
         std::stringstream ss(line);
@@ -490,7 +504,7 @@ int wmFSPBWT<Syllable>::readMacsQuery(string query_file) {
                     queryMissingData[{i,k}]=missingTemp[i];
                 }
             }
-            Z_.assign(M, 0); // 重置X_
+            Z_.assign(Q, 0); // 重置X_
             missingTemp.assign(Q, 0);
         }
 
@@ -955,9 +969,9 @@ int wmFSPBWT<Syllable>::outPanelLongMatchQuery(int L, string outPanelOutput_file
             for (int i = 0; i < Q; i++) {
                 int num = 0;
                 if (B == 64) {
-                    num = __builtin_popcountll(Z[i][k]);
+                    num = __builtin_popcountll((Z[i][k] | filter[k]));
                 } else if (B == 128) {
-                    num = countSetBits128(Z[i][k]);
+                    num = countSetBits128((Z[i][k] | filter[k]));
                 }
                 uint32_t temp = num % T;
                 fuzzyZ[i][index] = (fuzzyZ[i][index] << FF) | temp;
@@ -1306,371 +1320,598 @@ bool wmFSPBWT<Syllable>::inPanelSyllableEqual(int index_a, int index_b, int k)
     Syllable tempA = X[index_a][k];
     Syllable tempB = X[index_b][k];
 
-
-    // 1. 基础二进制 + missing 掩码比较
+    // 1. 快速检查 (注意：filter 可能会掩盖 0 vs 1 的差异，所以这一步只能用来快速排除，不能用来确信)
     if ((tempA | filter[k]) != (tempB | filter[k])) {
         return false;
     }
 
-    // 2. 处理 missing data（通配符）
+    // 2. 准备缺失数据掩码
     Syllable missA = 0, missB = 0;
     auto keyA = std::make_pair(index_a, k);
     auto keyB = std::make_pair(index_b, k);
     if (panelMissingData.count(keyA)) missA = panelMissingData[keyA];
     if (panelMissingData.count(keyB)) missB = panelMissingData[keyB];
 
-    // 3. 处理 multi-allelic：必须逐位点比较！
+    // 3. 准备多等位数据映射
     auto info_a = panelMultiInfo[index_a][k];
     auto info_b = panelMultiInfo[index_b][k];
 
-    // 构建真实值映射：pos -> value
+    // 只有当存在多等位位点时才构建 map，稍微优化性能
+    bool hasMultiA = info_a.second > 0;
+    bool hasMultiB = info_b.second > 0;
+
+    // 我们不需要构建完整的 map，直接在循环里查找或者构建一次皆可
+    // 为了保持逻辑清晰，这里还是构建 map，但只在需要时查找
     std::unordered_map<uint8_t, uint8_t> valA, valB;
-    for (unsigned int i = 0; i < info_a.second; ++i) {
-        auto [pos, v] = panelMultiValues[info_a.first + i];
-        valA[pos] = v;
+    if (hasMultiA) {
+        for (unsigned int i = 0; i < info_a.second; ++i) {
+            auto [pos, v] = panelMultiValues[info_a.first + i];
+            valA[pos] = v;
+        }
     }
-    for (unsigned int i = 0; i < info_b.second; ++i) {
-        auto [pos, v] = panelMultiValues[info_b.first + i];
-        valB[pos] = v;
+    if (hasMultiB) {
+        for (unsigned int i = 0; i < info_b.second; ++i) {
+            auto [pos, v] = panelMultiValues[info_b.first + i];
+            valB[pos] = v;
+        }
     }
 
-    // 遍历 block 内每个位点
+    // 4. 逐位精确比对
     for (int j = 0; j < B; ++j) {
-        if (j >= N - k*B) break;  // 防止越界
+        if (j >= N - k*B) break;
 
         int bit_shift = B - 1 - j;
         Syllable bitMask = (Syllable)1 << bit_shift;
 
-        // 如果任一方是 missing → 通配，跳过
+        // A. 检查缺失值：任一方为 missing 则视为匹配 (continue)
         if ((missA & bitMask) || (missB & bitMask)) {
             continue;
         }
 
-        // 否则，获取真实值
-        uint8_t realA = valA.count(j) ? valA[j] : 1;
-        uint8_t realB = valB.count(j) ? valB[j] : 1;
+        // B. 获取原始比特值 (0 或 1)
+        int rawBitA = (tempA >> bit_shift) & 1;
+        int rawBitB = (tempB >> bit_shift) & 1;
 
-        if (realA != realB) {
-            return false;  // '1' vs '2' → 不匹配！
+        // C. 基础比对：如果原始比特不同，肯定不匹配
+        if (rawBitA != rawBitB) {
+            return false; // 这里捕捉到了被 filter 掩盖的 0 vs 1 差异
+        }
+
+        // D. 进阶比对：如果都是 1，才需要检查是否是多等位基因 (如 1 vs 2)
+        if (rawBitA == 1) {
+            uint8_t realA = 1;
+            uint8_t realB = 1;
+
+            if (hasMultiA && valA.count(j)) realA = valA[j];
+            if (hasMultiB && valB.count(j)) realB = valB[j];
+
+            if (realA != realB) {
+                return false; // 捕捉 1 vs 2, 2 vs 3 等
+            }
         }
     }
 
     return true;
 }
-
 template<class Syllable>
 bool wmFSPBWT<Syllable>::outPanelSyllableEqual(int index_panel, int index_query, int k)
 {
+
     Syllable p = X[index_panel][k];
+
     Syllable q = Z[index_query][k];
 
 
-    // missing
-    Syllable missP = panelMissingData.count({index_panel, k}) ? panelMissingData[{index_panel, k}] : 0;
-    Syllable missQ = queryMissingData.count({index_query, k}) ? queryMissingData[{index_query, k}] : 0;
 
-    // multi-allelic
+    // 1. 准备缺失数据掩码
+
+    Syllable missP = 0, missQ = 0;
+
+    if (panelMissingData.count({index_panel, k})) missP = panelMissingData[{index_panel, k}];
+
+    if (queryMissingData.count({index_query, k})) missQ = queryMissingData[{index_query, k}];
+
+
+
+    // 2. 快速检查
+
+    // 逻辑：构建局部 filter (两者的 missing 并集)。
+
+    // 只要有一方是 missing，该位就被置为 1 (视为匹配)。
+
+    // 只有当两者都不是 missing 且 bit 值不同时，这里才会返回 false。
+
+    Syllable localFilter = missP | missQ;
+
+    if ((p | localFilter) != (q | localFilter)) {
+
+        return false;
+
+    }
+
+
+
+    // 3. 准备多等位数据映射 (优化：只在有多等位位点时构建)
+
     auto info_p = panelMultiInfo[index_panel][k];
+
     auto info_q = queryMultiInfo[index_query][k];
 
+
+
+    bool hasMultiP = info_p.second > 0;
+
+    bool hasMultiQ = info_q.second > 0;
+
+
+
     std::unordered_map<uint8_t, uint8_t> valP, valQ;
-    for (unsigned int i = 0; i < info_p.second; ++i)
-        valP[panelMultiValues[info_p.first + i].first] = panelMultiValues[info_p.first + i].second;
-    for (unsigned int i = 0; i < info_q.second; ++i)
-        valQ[queryMultiValues[info_q.first + i].first] = queryMultiValues[info_q.first + i].second;
+
+    if (hasMultiP) {
+
+        for (unsigned int i = 0; i < info_p.second; ++i) {
+
+            valP[panelMultiValues[info_p.first + i].first] = panelMultiValues[info_p.first + i].second;
+
+        }
+
+    }
+
+    if (hasMultiQ) {
+
+        for (unsigned int i = 0; i < info_q.second; ++i) {
+
+            valQ[queryMultiValues[info_q.first + i].first] = queryMultiValues[info_q.first + i].second;
+
+        }
+
+    }
+
+
+
+    // 4. 逐位精确比对
 
     for (int j = 0; j < B; ++j) {
+
         if (k * B + j >= N) break;
-        int shift = B - 1 - j;
-        Syllable mask = (Syllable)1 << shift;
 
-        // 任一方是 missing → 通配！
-        if ((missP & mask) || (missQ & mask)) continue;
 
-        uint8_t realP = valP.count(j) ? valP[j] : 1;
-        uint8_t realQ = valQ.count(j) ? valQ[j] : 1;
 
-        if (realP != realQ) return false;
-    }
-    return true;
-}
+        int bit_shift = B - 1 - j;
 
-template<class Syllable>
-void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a, int index_b,
-                                        std::ofstream &out)
-{
-    // ==================== 调试信息 ====================
-    std::cerr << "\n CALL inPanelRefine:\n";
-    std::cerr << "  Hap" << index_a << " vs Hap" << index_b << "  L=" << L << "\n";
-    std::cerr << "  连续匹配段: k=[" << (s_idx + 1) << ", " << e_idx << "]\n";
-    // ===============================================
+        Syllable bitMask = (Syllable)1 << bit_shift;
 
-    // 连续匹配段的位点范围（闭区间）
-    int seg_start = (s_idx + 1) * B;
-    int seg_end   = (e_idx + 1) * B - 1;  // 最后一个匹配块的最后一位
-    if (seg_end >= N) seg_end = N - 1;
 
-    int start = seg_start;
-    int end   = seg_end + 1;  // 开区间，方便后面统一处理
 
-    // ==========================================
-    // 1. 向左延伸（只在有前一块时）
-    // ==========================================
-    if (s_idx >= 0) {
-        // s_idx 是“前一块”，它可能部分匹配（后缀）
-        int left_block = s_idx;
-        Syllable missA = panelMissingData.count({index_a, left_block}) ? panelMissingData[{index_a, left_block}] : 0;
-        Syllable missB = panelMissingData.count({index_b, left_block}) ? panelMissingData[{index_b, left_block}] : 0;
-        auto info_a = panelMultiInfo[index_a][left_block];
-        auto info_b = panelMultiInfo[index_b][left_block];
+        // A. 检查缺失值：任一方为 missing 则视为匹配，跳过后续检查
 
-        int j = B - 1;
-        for (; j >= 0; --j) {
-            int global_pos = left_block * B + j;
-            if (global_pos < 0) break;
+        if ((missP & bitMask) || (missQ & bitMask)) {
 
-            int bit_shift = B - 1 - j;
-            Syllable bitMask = (Syllable)1 << bit_shift;
+            continue;
 
-            if ((missA & bitMask) || (missB & bitMask)) {
-                continue; // . 通配
-            }
-
-            int val_a = (X[index_a][left_block] >> bit_shift) & 1;
-            int val_b = (X[index_b][left_block] >> bit_shift) & 1;
-            if (val_a != val_b) break;
-
-            if (val_a == 1) {
-                int real_a = 1, real_b = 1;
-                // multi-allelic 检查
-                if (info_a.second > 0) {
-                    for (unsigned int k = 0; k < info_a.second; ++k) {
-                        if (panelMultiValues[info_a.first + k].first == (unsigned int)j) {
-                            real_a = panelMultiValues[info_a.first + k].second;
-                            break;
-                        }
-                    }
-                }
-                if (info_b.second > 0) {
-                    for (unsigned int k = 0; k < info_b.second; ++k) {
-                        if (panelMultiValues[info_b.first + k].first == (unsigned int)j) {
-                            real_b = panelMultiValues[info_b.first + k].second;
-                            break;
-                        }
-                    }
-                }
-                if (real_a != real_b) break;
-            }
         }
-        start = left_block * B + (j + 1);  // j+1 是第一个不匹配的 → 开区间
+
+
+
+        // B. 获取原始比特值 (0 或 1)
+
+        int rawBitP = (p >> bit_shift) & 1;
+
+        int rawBitQ = (q >> bit_shift) & 1;
+
+
+
+        // C. 基础比对：如果原始比特不同，肯定不匹配
+
+        if (rawBitP != rawBitQ) {
+
+            return false;
+
+        }
+
+
+
+        // D. 进阶比对：如果都是 1，才检查多等位基因 (如 1 vs 2)
+
+        if (rawBitP == 1) {
+
+            uint8_t realP = 1;
+
+            uint8_t realQ = 1;
+
+
+
+            if (hasMultiP && valP.count(j)) realP = valP[j];
+
+            if (hasMultiQ && valQ.count(j)) realQ = valQ[j];
+
+
+
+            if (realP != realQ) {
+
+                return false;
+
+            }
+
+        }
+
+    }
+
+
+
+    return true;
+
+}
+template<class Syllable>
+void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a, int index_b, std::ofstream &out) {
+
+    // =========================================================
+    // 调试开关：锁定报错的样本对 (13 和 21)
+    // =========================================================
+    string idA = IDs[index_a];
+    string idB = IDs[index_b];
+
+    // =============================================================
+    // 【核磁共振】直接检查 Block 3 和 Block 4 的原始数据
+    // =============================================================
+    if (IDs[index_a] == "1" && IDs[index_b] == "18") {
+        std::cerr << "\n[MRI SCAN] Inspecting 1 vs 18..." << std::endl;
+
+        // 检查 Block 3 (包含位点 255)
+        int blk = 3;
+        Syllable missA = 0, missB = 0;
+        if (panelMissingData.count({index_a, blk})) missA = panelMissingData[{index_a, blk}];
+        if (panelMissingData.count({index_b, blk})) missB = panelMissingData[{index_b, blk}];
+
+        std::cerr << "Block " << blk << " (Bits 192-255):" << std::endl;
+        // 打印 LSB (位点 255) 的状态
+        std::cerr << "  Bit 255 (LSB) Missing Mask -> A: " << (missA & 1) << ", B: " << (missB & 1) << std::endl;
+
+        // 检查 Block 4 (包含位点 256-319)
+        blk = 4;
+        missA = 0; missB = 0;
+        if (panelMissingData.count({index_a, blk})) missA = panelMissingData[{index_a, blk}];
+        if (panelMissingData.count({index_b, blk})) missB = panelMissingData[{index_b, blk}];
+
+        std::cerr << "Block " << blk << " (Bits 256-319):" << std::endl;
+        // 打印 MSB (位点 256) 的状态
+        // 注意：MSB 是 (1 << 63)
+        Syllable msb = ((Syllable)1) << 63;
+        std::cerr << "  Bit 256 (MSB) Missing Mask -> A: " << ((missA & msb) ? 1 : 0)
+                  << ", B: " << ((missB & msb) ? 1 : 0) << std::endl;
+
+        // 检查是否有“全1”造成的幽灵缺失
+        if (missA == (Syllable)-1 || missB == (Syllable)-1) {
+            std::cerr << "  [ALARM] Full Block Missing Detected! This implies logic error." << std::endl;
+        }
+    }
+    // =============================================================
+    // 如果是 Round 2 的随机数据，ID 可能是 "13" 和 "21"
+    bool debug = (idA == "1" && idB == "18") || (idA == "18" && idB == "1");
+
+    if (debug) {
+        std::cerr << "\n[DEBUG Refine] START Checking " << idA << " vs " << idB << std::endl;
+        std::cerr << "  Input Params: s_idx=" << s_idx << " e_idx=" << e_idx << " L=" << L << std::endl;
     }
 
     // ==========================================
-    // 2. 向右延伸（从 e_idx + 1 开始）
+    // 1. 计算 Start (向左)
     // ==========================================
-    for (int curr_block = e_idx; curr_block < n; ++curr_block) {
-        Syllable missA = panelMissingData.count({index_a, curr_block}) ? panelMissingData[{index_a, curr_block}] : 0;
-        Syllable missB = panelMissingData.count({index_b, curr_block}) ? panelMissingData[{index_b, curr_block}] : 0;
+    int start = 0;
+    if (s_idx == -1) {
+        start = 0;
+    } else {
+        auto info_a = panelMultiInfo[index_a][s_idx];
+        auto info_b = panelMultiInfo[index_b][s_idx];
+
+        Syllable missA = 0, missB = 0;
+        if (panelMissingData.count({index_a, s_idx})) missA = panelMissingData[{index_a, s_idx}];
+        if (panelMissingData.count({index_b, s_idx})) missB = panelMissingData[{index_b, s_idx}];
+
+        int suffix_len = 0;
+        for (int j = B - 1; j >= 0; --j) {
+            int bit_shift = B - 1 - j;
+            Syllable bitMask = ((Syllable)1) << bit_shift;
+
+            bool is_missing = (missA & bitMask) || (missB & bitMask);
+            int val_a = (X[index_a][s_idx] >> bit_shift) & 1;
+            int val_b = (X[index_b][s_idx] >> bit_shift) & 1;
+
+            bool is_match = true;
+            if (!is_missing) {
+                if (val_a != val_b) is_match = false;
+                else if (val_a == 1) {
+                    // Multi-allelic check (simplified for debug view)
+                    int ra=1, rb=1;
+                    if(info_a.second>0) {for(unsigned k=0;k<info_a.second;++k) if(panelMultiValues[info_a.first+k].first==j) {ra=panelMultiValues[info_a.first+k].second; break;}}
+                    if(info_b.second>0) {for(unsigned k=0;k<info_b.second;++k) if(panelMultiValues[info_b.first+k].first==j) {rb=panelMultiValues[info_b.first+k].second; break;}}
+                    if(ra!=rb) is_match = false;
+                }
+            }
+
+            if (!is_match) break;
+            suffix_len++;
+        }
+        start = (s_idx + 1) * B - suffix_len;
+    }
+
+    if (debug) {
+        std::cerr << "  Calculated Start: " << start << std::endl;
+    }
+
+    // ==========================================
+    // 2. 计算 End (向右贪心扫描)
+    // ==========================================
+    int scan_pos = (e_idx == 0 && start > 0) ? start : e_idx * B;
+    // 注意：如果 identification 传进来 e_idx，通常意味着从该块开始查
+    // 但为了贪心，如果 start 已经算出来了，我们应该从 start 开始往后扫，或者至少从 start + len 开始
+    // 这里保持原来的逻辑：从 e_idx 块开始扫 (通常 e_idx * B >= start)
+
+    // 修正扫描起点：Refine 应该从 calculated start 之后开始确认，
+    // 或者简单点，既然我们支持跨块，直接从 start 开始往后扫一遍全长确认也可以。
+    // 但为了效率，我们还是从 e_idx * B 开始。
+
+    // 如果 start 算出来比如是 700，而 e_idx*B 是 704 (block 11 start)，那我们就从 704 开始往后看
+    int curr_scan_base = (e_idx * B > start) ? e_idx * B : start;
+
+    // 【关键调试区】：我们重点关注向右延伸的过程
+    int end = curr_scan_base;
+    bool mismatch_found = false;
+
+    // 计算起始块索引
+    int start_blk = curr_scan_base / B;
+    int start_bit = curr_scan_base % B;
+
+    for (int curr_block = start_blk; curr_block < n; ++curr_block) {
+
         auto info_a = panelMultiInfo[index_a][curr_block];
         auto info_b = panelMultiInfo[index_b][curr_block];
 
-        int j = 0;
-        for (; j < B; ++j) {
+        Syllable missA = 0, missB = 0;
+        if (panelMissingData.count({index_a, curr_block})) missA = panelMissingData[{index_a, curr_block}];
+        if (panelMissingData.count({index_b, curr_block})) missB = panelMissingData[{index_b, curr_block}];
+
+        // 如果是第一个块，从 start_bit 开始；否则从 0 开始
+        int j_start = (curr_block == start_blk) ? start_bit : 0;
+
+        for (int j = j_start; j < B; ++j) {
             int global_pos = curr_block * B + j;
+
             if (global_pos >= N) {
                 end = N;
-                goto right_done;
+                mismatch_found = true;
+                if (debug) std::cerr << "  -> Hit End of Genome at " << N << std::endl;
+                goto end_loop;
             }
 
             int bit_shift = B - 1 - j;
-            Syllable bitMask = (Syllable)1 << bit_shift;
+            Syllable bitMask = ((Syllable)1) << bit_shift;
 
+            // --- 诊断信息的核心 ---
+            // 我们特别关注报错位置 787 附近的情况
+            if (debug && global_pos >= 780 && global_pos <= 790) {
+                std::cerr << "  [CHECK @" << global_pos << "] ";
+                int va = (X[index_a][curr_block] >> bit_shift) & 1;
+                int vb = (X[index_b][curr_block] >> bit_shift) & 1;
+                bool ma = (missA & bitMask);
+                bool mb = (missB & bitMask);
+                std::cerr << "Val: " << va << "/" << vb
+                          << " Miss: " << ma << "/" << mb;
+
+                if (ma || mb) std::cerr << " -> IGNORE (Missing)" << std::endl;
+                else if (va != vb) std::cerr << " -> MISMATCH!" << std::endl;
+                else std::cerr << " -> MATCH" << std::endl;
+            }
+            // ---------------------
+
+            bool is_match = true;
             if ((missA & bitMask) || (missB & bitMask)) {
-                continue;
-            }
+                // Match (Missing)
+            } else {
+                int val_a = (X[index_a][curr_block] >> bit_shift) & 1;
+                int val_b = (X[index_b][curr_block] >> bit_shift) & 1;
 
-            int val_a = (X[index_a][curr_block] >> bit_shift) & 1;
-            int val_b = (X[index_b][curr_block] >> bit_shift) & 1;
-            if (val_a != val_b) {
-                end = global_pos;
-                goto right_done;
-            }
-
-            if (val_a == 1) {
-                int real_a = 1, real_b = 1;
-                if (info_a.second > 0) for (unsigned int k = 0; k < info_a.second; ++k)
-                    if (panelMultiValues[info_a.first + k].first == (unsigned int)j) { real_a = panelMultiValues[info_a.first + k].second; break; }
-                if (info_b.second > 0) for (unsigned int k = 0; k < info_b.second; ++k)
-                    if (panelMultiValues[info_b.first + k].first == (unsigned int)j) { real_b = panelMultiValues[info_b.first + k].second; break; }
-                if (real_a != real_b) {
-                    end = global_pos;
-                    goto right_done;
+                if (val_a != val_b) {
+                    is_match = false;
+                } else if (val_a == 1) {
+                    int real_a = 1, real_b = 1;
+                    if (info_a.second > 0) {
+                        for(unsigned k=0; k<info_a.second; ++k)
+                            if(panelMultiValues[info_a.first+k].first==j) { real_a=panelMultiValues[info_a.first+k].second; break; }
+                    }
+                    if (info_b.second > 0) {
+                        for(unsigned k=0; k<info_b.second; ++k)
+                            if(panelMultiValues[info_b.first+k].first==j) { real_b=panelMultiValues[info_b.first+k].second; break; }
+                    }
+                    if (real_a != real_b) is_match = false;
                 }
+            }
+
+            if (!is_match) {
+                end = global_pos;
+                mismatch_found = true;
+                if (debug) std::cerr << "  -> STOPPED at " << end << " (Mismatch)" << std::endl;
+                goto end_loop;
             }
         }
         end = (curr_block + 1) * B;
     }
-    end = N;
-right_done:
-    if (end > N) end = N;
 
-    // ==========================================
-    // 3. 输出
-    // ==========================================
+    if (!mismatch_found && end > N) end = N;
+
+    end_loop:;
+
+    if (debug) {
+        std::cerr << "  Refine Result: [" << start << ", " << end << "]" << std::endl;
+        std::cerr << "  Outputting? " << (end - start >= L ? "YES" : "NO") << std::endl;
+    }
+
     if (end - start >= L) {
-        std::cerr << "  → 输出匹配 [" << start << ", " << (end-1) << "] 长度=" << (end-start) << "\n";
-        out << IDs[index_a] << '\t' << IDs[index_b] << '\t' << start << '\t' << (end - 1) << '\n';
+        out << IDs[index_a] << '\t' << IDs[index_b] << '\t' << start << '\t' << end - 1 << '\n';
         ++inPanelMatchNum;
         matchLen += (end - start);
     }
 }
 
 template<class Syllable>
-void wmFSPBWT<Syllable>::outPanelRefine(int L, int s_idx, int e_idx, int index_panel, int index_query,
-                                         std::ofstream &out)
-{
-    // ==================== 调试信息（可删）===================
-    std::cerr << "\n CALL outPanelRefine:\n";
-    std::cerr << "  PanelHap" << index_panel << " vs QueryHap" << index_query << " L=" << L << "\n";
-    std::cerr << "  连续匹配段: k=[" << (s_idx + 1) << ", " << e_idx << "]\n";
-    // ===============================================
+void wmFSPBWT<Syllable>::outPanelRefine(int L, int s_idx, int e_idx, int index_panel, int index_query, std::ofstream &out) {
 
-    int seg_start = (s_idx + 1) * B;
-    int seg_end   = (e_idx + 1) * B - 1;
-    if (seg_end >= N) seg_end = N - 1;
-
-    int start = seg_start;
-    int end   = seg_end + 1;  // 开区间
 
     // ==========================================
-    // 1. 向左延伸（只在 s_idx >= 0 时）
+    // 1. 计算 Start (向左延伸)
     // ==========================================
-    if (s_idx >= 0) {
-        int left_block = s_idx;
+    int start = 0;
+    if (s_idx == -1) {
+        start = 0;
+    } else {
+        // 获取当前块的多等位信息
+        auto info_p = panelMultiInfo[index_panel][s_idx];
+        auto info_q = queryMultiInfo[index_query][s_idx]; // Query 使用 queryMultiInfo
 
-        Syllable missP = panelMissingData.count({index_panel, left_block})
-                         ? panelMissingData[{index_panel, left_block}] : 0;
-        Syllable missQ = queryMissingData.count({index_query, left_block})
-                         ? queryMissingData[{index_query, left_block}] : 0;
+        // 获取缺失数据掩码
+        Syllable missP = 0, missQ = 0;
+        if (panelMissingData.count({index_panel, s_idx})) missP = panelMissingData[{index_panel, s_idx}];
+        if (queryMissingData.count({index_query, s_idx})) missQ = queryMissingData[{index_query, s_idx}]; // Query 使用 queryMissingData
 
-        auto info_p = panelMultiInfo[index_panel][left_block];
-        auto info_q = queryMultiInfo[index_query][left_block];
-
-        int j = B - 1;
-        for (; j >= 0; --j) {
-            int global_pos = left_block * B + j;
-            if (global_pos < 0) break;
-
+        int suffix_len = 0;
+        for (int j = B - 1; j >= 0; --j) {
             int bit_shift = B - 1 - j;
-            Syllable bitMask = (Syllable)1 << bit_shift;
+            Syllable bitMask = ((Syllable)1) << bit_shift;
 
-            if ((missP & bitMask) || (missQ & bitMask)) {
-                continue;  // . 通配
-            }
+            // 检查缺失值 (Panel 或 Query 任意一方缺失即视为匹配)
+            bool is_missing = (missP & bitMask) || (missQ & bitMask);
 
-            int val_p = (X[index_panel][left_block] >> bit_shift) & 1;
-            int val_q = (Z[index_query][left_block] >> bit_shift) & 1;
-            if (val_p != val_q) break;
+            // 获取二进制值 (Panel 用 X, Query 用 Z)
+            int val_p = (X[index_panel][s_idx] >> bit_shift) & 1;
+            int val_q = (Z[index_query][s_idx] >> bit_shift) & 1;
 
-            if (val_p == 1) {
-                int real_p = 1, real_q = 1;
+            bool is_match = true;
+            if (!is_missing) {
+                if (val_p != val_q) {
+                    is_match = false;
+                } else if (val_p == 1) {
+                    // 多等位位点检查 (值为1时，检查具体是哪个等位基因)
+                    int real_p = 1, real_q = 1;
 
-                if (info_p.second > 0) {
-                    for (unsigned int k = 0; k < info_p.second; ++k) {
-                        if (panelMultiValues[info_p.first + k].first == (unsigned int)j) {
-                            real_p = panelMultiValues[info_p.first + k].second;
-                            break;
+                    // Panel 检查
+                    if (info_p.second > 0) {
+                        for (unsigned k = 0; k < info_p.second; ++k) {
+                            if (panelMultiValues[info_p.first + k].first == j) {
+                                real_p = panelMultiValues[info_p.first + k].second;
+                                break;
+                            }
                         }
                     }
-                }
-                if (info_q.second > 0) {
-                    for (unsigned int k = 0; k < info_q.second; ++k) {
-                        if (queryMultiValues[info_q.first + k].first == (unsigned int)j) {
-                            real_q = queryMultiValues[info_q.first + k].second;
-                            break;
+
+                    // Query 检查 (使用 queryMultiValues)
+                    if (info_q.second > 0) {
+                        for (unsigned k = 0; k < info_q.second; ++k) {
+                            if (queryMultiValues[info_q.first + k].first == j) {
+                                real_q = queryMultiValues[info_q.first + k].second;
+                                break;
+                            }
                         }
                     }
+
+                    if (real_p != real_q) is_match = false;
                 }
-                if (real_p != real_q) break;
             }
+
+            if (!is_match) break;
+            suffix_len++;
         }
-        start = left_block * B + (j + 1);  // 开区间
+        start = (s_idx + 1) * B - suffix_len;
     }
 
+
+
     // ==========================================
-    // 2. 向右延伸（从 e_idx 开始！必须包含 e_idx 块的前缀）
+    // 2. 计算 End (向右贪心扫描)
     // ==========================================
-    for (int curr_block = e_idx; curr_block < n; ++curr_block) {
-        Syllable missP = panelMissingData.count({index_panel, curr_block})
-                         ? panelMissingData[{index_panel, curr_block}] : 0;
-        Syllable missQ = queryMissingData.count({index_query, curr_block})
-                         ? queryMissingData[{index_query, curr_block}] : 0;
+    // 逻辑与 inPanel 保持完全一致：从计算出的 start 或 e_idx 开始扫描
+    int curr_scan_base = (e_idx * B > start) ? e_idx * B : start;
+
+    int end = curr_scan_base;
+    bool mismatch_found = false;
+
+    int start_blk = curr_scan_base / B;
+    int start_bit = curr_scan_base % B;
+
+    for (int curr_block = start_blk; curr_block < n; ++curr_block) {
 
         auto info_p = panelMultiInfo[index_panel][curr_block];
         auto info_q = queryMultiInfo[index_query][curr_block];
 
-        int j = 0;
-        for (; j < B; ++j) {
+        Syllable missP = 0, missQ = 0;
+        if (panelMissingData.count({index_panel, curr_block})) missP = panelMissingData[{index_panel, curr_block}];
+        if (queryMissingData.count({index_query, curr_block})) missQ = queryMissingData[{index_query, curr_block}];
+
+        // 如果是起始块，从 start_bit 开始；否则从 0 开始
+        int j_start = (curr_block == start_blk) ? start_bit : 0;
+
+        for (int j = j_start; j < B; ++j) {
             int global_pos = curr_block * B + j;
+
             if (global_pos >= N) {
                 end = N;
-                goto right_done;
+                mismatch_found = true;
+                goto end_loop;
             }
 
             int bit_shift = B - 1 - j;
-            Syllable bitMask = (Syllable)1 << bit_shift;
+            Syllable bitMask = ((Syllable)1) << bit_shift;
 
+
+            bool is_match = true;
             if ((missP & bitMask) || (missQ & bitMask)) {
-                continue;
+                // Match (Missing)
+            } else {
+                int val_p = (X[index_panel][curr_block] >> bit_shift) & 1;
+                int val_q = (Z[index_query][curr_block] >> bit_shift) & 1;
+
+                if (val_p != val_q) {
+                    is_match = false;
+                } else if (val_p == 1) {
+                    int real_p = 1, real_q = 1;
+
+                    // Panel 检查
+                    if (info_p.second > 0) {
+                        for(unsigned k=0; k<info_p.second; ++k)
+                            if(panelMultiValues[info_p.first+k].first==j) { real_p=panelMultiValues[info_p.first+k].second; break; }
+                    }
+
+                    // Query 检查
+                    if (info_q.second > 0) {
+                        for(unsigned k=0; k<info_q.second; ++k)
+                            if(queryMultiValues[info_q.first+k].first==j) { real_q=queryMultiValues[info_q.first+k].second; break; }
+                    }
+
+                    if (real_p != real_q) is_match = false;
+                }
             }
 
-            int val_p = (X[index_panel][curr_block] >> bit_shift) & 1;
-            int val_q = (Z[index_query][curr_block] >> bit_shift) & 1;
-            if (val_p != val_q) {
+            if (!is_match) {
                 end = global_pos;
-                goto right_done;
-            }
-
-            if (val_p == 1) {
-                int real_p = 1, real_q = 1;
-                if (info_p.second > 0) {
-                    for (unsigned int k = 0; k < info_p.second; ++k) {
-                        if (panelMultiValues[info_p.first + k].first == (unsigned int)j) {
-                            real_p = panelMultiValues[info_p.first + k].second;
-                            break;
-                        }
-                    }
-                }
-                if (info_q.second > 0) {
-                    for (unsigned int k = 0; k < info_q.second; ++k) {
-                        if (queryMultiValues[info_q.first + k].first == (unsigned int)j) {
-                            real_q = queryMultiValues[info_q.first + k].second;
-                            break;
-                        }
-                    }
-                }
-                if (real_p != real_q) {
-                    end = global_pos;
-                    goto right_done;
-                }
+                mismatch_found = true;
+                goto end_loop;
             }
         }
         end = (curr_block + 1) * B;
     }
-    end = N;
 
-right_done:
-    if (end > N) end = N;
+    if (!mismatch_found && end > N) end = N;
+
+    end_loop:;
+
+
 
     // ==========================================
-    // 3. 输出
+    // 3. 输出与统计
     // ==========================================
     if (end - start >= L) {
-        std::cerr << "  → 输出匹配 [" << start << ", " << (end-1) << "] 长度=" << (end-start) << "\n";
-        out << IDs[index_panel] << '\t'
-            << qIDs[index_query] << '\t'
-            << start << '\t' << (end - 1) << '\n';
-        ++outPanelMatchNum;
+        // 注意：这里 Query 使用 qIDs
+        out << IDs[index_panel] << '\t' << qIDs[index_query] << '\t' << start << '\t' << end - 1 << '\n';
+        ++outPanelMatchNum; // 更新 Panel 外匹配计数
         matchLen += (end - start);
     }
 }
@@ -1679,14 +1920,14 @@ template<class Syllable>
 void wmFSPBWT<Syllable>::inPanelIdentification(int L, int s_idx, int e_idx, int index_a,
                                                 int index_b, std::ofstream &out) {
 
-    // ==================== 调试信息：谁、在什么时候、用什么范围调用了我 ====================
-    std::cerr << "\n>>> inPanelIdentification 被调用！\n";
-    std::cerr << "    Hap" << index_a << " vs Hap" << index_b
-              << "   L=" << L
-              << "   s_idx=" << s_idx
-              << "   e_idx=" << e_idx
-              << "   (范围长度 = " << (e_idx - s_idx) << " 个 syllable)\n";
-    // =====================================================================================
+    // // ==================== 调试信息：谁、在什么时候、用什么范围调用了我 ====================
+    // std::cerr << "\n>>> inPanelIdentification 被调用！\n";
+    // std::cerr << "    Hap" << index_a << " vs Hap" << index_b
+    //           << "   L=" << L
+    //           << "   s_idx=" << s_idx
+    //           << "   e_idx=" << e_idx
+    //           << "   (范围长度 = " << (e_idx - s_idx) << " 个 syllable)\n";
+    // // =====================================================================================
     alternativeSyllableNum += (e_idx - s_idx + 1);
     clock_t start, end;
     start = clock();
@@ -1712,15 +1953,15 @@ void wmFSPBWT<Syllable>::inPanelIdentification(int L, int s_idx, int e_idx, int 
 template<class Syllable>
 void wmFSPBWT<Syllable>::outPanelIdentification(int L, int s_idx, int e_idx, int index_panel,
                                                 int index_query, std::ofstream &out) {
-
-    // ==================== 调试信息：谁、在什么时候、用什么范围调用了我 ====================
-    std::cerr << "\n>>> outPanelIdentification 被调用！\n";
-    std::cerr << " PanelHap" << index_panel << " vs QueryHap" << index_query
-              << " L=" << L
-              << " s_idx=" << s_idx
-              << " e_idx=" << e_idx
-              << " (范围长度 = " << (e_idx - s_idx) << " 个 syllable)\n";
-    // =====================================================================================
+    //
+    // // ==================== 调试信息：谁、在什么时候、用什么范围调用了我 ====================
+    // std::cerr << "\n>>> outPanelIdentification 被调用！\n";
+    // std::cerr << " PanelHap" << index_panel << " vs QueryHap" << index_query
+    //           << " L=" << L
+    //           << " s_idx=" << s_idx
+    //           << " e_idx=" << e_idx
+    //           << " (范围长度 = " << (e_idx - s_idx) << " 个 syllable)\n";
+    // // =====================================================================================
 
 
     alternativeSyllableNum += (e_idx - s_idx + 1);
