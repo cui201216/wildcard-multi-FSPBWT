@@ -1712,6 +1712,17 @@ void wmFSPBWT<Syllable>::inPanelIdentification(int L, int s_idx, int e_idx, int 
 template<class Syllable>
 void wmFSPBWT<Syllable>::outPanelIdentification(int L, int s_idx, int e_idx, int index_panel,
                                                 int index_query, std::ofstream &out) {
+
+    // ==================== 调试信息：谁、在什么时候、用什么范围调用了我 ====================
+    std::cerr << "\n>>> outPanelIdentification 被调用！\n";
+    std::cerr << " PanelHap" << index_panel << " vs QueryHap" << index_query
+              << " L=" << L
+              << " s_idx=" << s_idx
+              << " e_idx=" << e_idx
+              << " (范围长度 = " << (e_idx - s_idx) << " 个 syllable)\n";
+    // =====================================================================================
+
+
     alternativeSyllableNum += (e_idx - s_idx + 1);
     clock_t start, end;
     start = clock();
