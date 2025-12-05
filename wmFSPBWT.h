@@ -106,7 +106,7 @@ struct wmFSPBWT {
                                int index_b, ofstream &out);
 
 
-    bool outPanelSyllableMultiEqual(int index_panel, int index_query, int k);
+    bool outPanelSyllableEqual(int index_panel, int index_query, int k);
 
     void outPanelRefine(int L, int s_idx, int e_idx, int index_panel, int index_query,
                     ofstream &out);
@@ -1306,6 +1306,7 @@ bool wmFSPBWT<Syllable>::inPanelSyllableEqual(int index_a, int index_b, int k)
     Syllable tempA = X[index_a][k];
     Syllable tempB = X[index_b][k];
 
+
     // 1. 基础二进制 + missing 掩码比较
     if ((tempA | filter[k]) != (tempB | filter[k])) {
         return false;
@@ -1358,27 +1359,41 @@ bool wmFSPBWT<Syllable>::inPanelSyllableEqual(int index_a, int index_b, int k)
 }
 
 template<class Syllable>
-bool wmFSPBWT<Syllable>::outPanelSyllableMultiEqual(int index_panel, int index_query, int k) {
-    if (X[index_panel][k] != Z[index_query][k]) {
-        return false;
-    }
-    auto info_panel = panelMultiInfo[index_panel][k];
-    auto info_query = queryMultiInfo[index_query][k];
-    if (info_panel.second != info_query.second) {
-        return false;
-    }
-    if (info_panel.second == 0) {
-        return true;
-    }
-    // 比较多字符位点列表
-    for (unsigned int i = 0; i < info_panel.second; i++) {
-        if (panelMultiValues[info_panel.first + i] != queryMultiValues[info_query.first + i]) {
-            return false;
-        }
+bool wmFSPBWT<Syllable>::outPanelSyllableEqual(int index_panel, int index_query, int k)
+{
+    Syllable p = X[index_panel][k];
+    Syllable q = Z[index_query][k];
+
+
+    // missing
+    Syllable missP = panelMissingData.count({index_panel, k}) ? panelMissingData[{index_panel, k}] : 0;
+    Syllable missQ = queryMissingData.count({index_query, k}) ? queryMissingData[{index_query, k}] : 0;
+
+    // multi-allelic
+    auto info_p = panelMultiInfo[index_panel][k];
+    auto info_q = queryMultiInfo[index_query][k];
+
+    std::unordered_map<uint8_t, uint8_t> valP, valQ;
+    for (unsigned int i = 0; i < info_p.second; ++i)
+        valP[panelMultiValues[info_p.first + i].first] = panelMultiValues[info_p.first + i].second;
+    for (unsigned int i = 0; i < info_q.second; ++i)
+        valQ[queryMultiValues[info_q.first + i].first] = queryMultiValues[info_q.first + i].second;
+
+    for (int j = 0; j < B; ++j) {
+        if (k * B + j >= N) break;
+        int shift = B - 1 - j;
+        Syllable mask = (Syllable)1 << shift;
+
+        // 任一方是 missing → 通配！
+        if ((missP & mask) || (missQ & mask)) continue;
+
+        uint8_t realP = valP.count(j) ? valP[j] : 1;
+        uint8_t realQ = valQ.count(j) ? valQ[j] : 1;
+
+        if (realP != realQ) return false;
     }
     return true;
 }
-
 
 template<class Syllable>
 void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a, int index_b,
@@ -1716,14 +1731,14 @@ void wmFSPBWT<Syllable>::outPanelIdentification(int L, int s_idx, int e_idx, int
     int head = s_idx + 1, tail;
     while (head < e_idx) {
         tail = head;
-        while (tail < e_idx && outPanelSyllableMultiEqual(index_panel, index_query, tail)) {
+        while (tail < e_idx && outPanelSyllableEqual(index_panel, index_query, tail)) {
             tail++;
         }
         if (tail - head >= l) {
             outPanelRefine(L, head - 1, tail, index_panel, index_query, out);
         }
         head = tail + 1;
-        while (head < e_idx && !outPanelSyllableMultiEqual(index_panel, index_query, head)) {
+        while (head < e_idx && !outPanelSyllableEqual(index_panel, index_query, head)) {
             head++;
         }
     }
