@@ -137,17 +137,21 @@ int main(int argc, char* argv[]) {
         std::cout << "读取面板: " << a << "\n";
         if (a != 0) return a;
 
-        int b = CRY.makePanel();
-        std::cout << "生成模糊面板: " << b << "\n";
-        if (b != 0) return b;
+
 
         int c;
         if (queryMode == "in") {
+            int b = CRY.makePanel();
+            std::cout << "生成模糊面板: " << b << "\n";
+            if (b != 0) return b;
             c = CRY.inPanelLongMatchQuery(queryLength, outputFile);
             std::cout << "面板内查询完成: " << c << "\n";
         } else if(queryMode == "out") {
             int w = CRY.readMacsQuery(queryFile);
             std::cout << "<读取查询完成>: " << w << "\n";
+            int b = CRY.makePanel();
+            std::cout << "生成模糊面板: " << b << "\n";
+            if (b != 0) return b;
             c = CRY.outPanelLongMatchQuery(queryLength, outputFile);
             std::cout << "面板外查询完成: " << c << "\n";
 
@@ -168,17 +172,21 @@ int main(int argc, char* argv[]) {
         std::cout << "读取面板: " << a << "\n";
         if (a != 0) return a;
 
-        int b = CRY.makePanel();
-        std::cout << "生成模糊面板: " << b << "\n";
-        if (b != 0) return b;
 
         int c;
         if (queryMode == "in") {
+            int b = CRY.makePanel();
+            std::cout << "生成模糊面板: " << b << "\n";
+            if (b != 0) return b;
             c = CRY.inPanelLongMatchQuery(queryLength, outputFile);
             std::cout << "面板内查询完成: " << c << "\n";
-        } else if(queryMode == "out") {
+        } else if(queryMode == "out")
+        {
             int w = CRY.readMacsQuery(queryFile);
             std::cout << "<读取查询完成>: " << w << "\n";
+            int b = CRY.makePanel();
+            std::cout << "生成模糊面板: " << b << "\n";
+            if (b != 0) return b;
             c = CRY.outPanelLongMatchQuery(queryLength, outputFile);
             std::cout << "面板外查询完成: " << c << "\n";
         }
