@@ -247,12 +247,7 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file)
         // 处理音节边界
         if (K % B == 0 && K != 0)
         {
-            // --- 陷阱：检查 K=256 时 Sample 1 的状态 ---
-            if (K == 256)
-            {
-                std::cerr << "\n[TRAP K=256] Before Clear: missingTemp[1] = " << missingTemp[1] << std::endl;
-            }
-            // ----------------------------------------
+
             k = K / B - 1; // 上一个音节的索引
             if (k >= n)
             {
@@ -295,17 +290,7 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file)
             X_.assign(M, 0); // 重置X_
             missingTemp.assign(M, 0);
             filterTemp = 0;
-            // --- 陷阱：检查清零是否成功 ---
-            if (K == 256)
-            {
-                std::cerr << "[TRAP K=256] After Clear:  missingTemp[1] = " << missingTemp[1] << std::endl;
-                if (missingTemp[1] != 0)
-                {
-                    std::cerr << "FATAL: CLEAR FAILED!" << std::endl;
-                    exit(1);
-                }
-            }
-            // ----------------------------------------
+
         }
 
         std::stringstream ss(line);
@@ -439,7 +424,6 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file)
 
     end = clock();
     readPanelTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-    std::cerr << "readPanelTime = " << readPanelTime << " 秒, 多字符位点数 = " << panelMultiValues.size() << std::endl;
     panelMultiValues.shrink_to_fit();
     return 0;
 }
