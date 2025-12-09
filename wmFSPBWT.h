@@ -604,20 +604,24 @@ int wmFSPBWT<Syllable>::readMacsQuery(string query_file)
             if (c == '0')
             {
                 Z_[index] = Z_[index] << 1;
+                ++queryCount[0];
             }
             else if (c == '1')
             {
                 Z_[index] = (Z_[index] << 1) | 1;
+                ++queryCount[1];
             }
             else if (c > '1' && c <= '9')
             {
                 Z_[index] = (Z_[index] << 1) | 1; // 多字符位点记为1
+                ++queryCount[c-'0'];
                 syllableMultis[index].push_back(
                     std::make_pair(static_cast<uint8_t>(K % B), static_cast<uint8_t>(c - '0')));
             }
             else if (c == '.')
             {
                 Z_[index] = (Z_[index] << 1) | 1;
+                ++queryCount[10];
                 missingTemp[index] |= (one << (B - 1 - K % B)); // 记录 query missing
                 querySyllableHavingMissing[index][K / B] = true;
             }
@@ -2403,6 +2407,7 @@ void wmFSPBWT<Syllable>::outputInformationToFile(const std::string& fileName, st
             {
                 outputFile << "Site " << i << ": " << panelCount[i] << std::endl;
             }
+            outputFile << "PanelMissingSite "  << panelCount[10] << std::endl;
             std::cout << "Information has been written to " << fileName
                 << std::endl;
         }
@@ -2445,6 +2450,7 @@ void wmFSPBWT<Syllable>::outputInformationToFile(const std::string& fileName, st
             {
                 outputFile << "Site " << i << ": " << panelCount[i] << std::endl;
             }
+            outputFile << "PanelMissingSite "  << panelCount[10] << std::endl;
             outputFile << std::endl;
 
             outputFile << "Query Site Counts:" << std::endl;
@@ -2452,6 +2458,7 @@ void wmFSPBWT<Syllable>::outputInformationToFile(const std::string& fileName, st
             {
                 outputFile << "Site " << i << ": " << queryCount[i] << std::endl;
             }
+            outputFile << "QueryMissingSite "  << queryCount[10] << std::endl;
             outputFile << std::endl;
             outputFile.close();
             std::cout << "Information has been written to " << fileName
