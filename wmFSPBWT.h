@@ -84,8 +84,8 @@ struct wmFSPBWT
     std::vector<std::vector<std::pair<unsigned int, uint8_t>>> queryMultiInfo; // Q × n，存储 (start_index, length)
     std::vector<std::pair<uint8_t, uint8_t>> queryMultiValues; // 存储所有多字符位点 (position, value)
 
-    u_long panelCount[10] = {0};
-    u_long queryCount[10] = {0};
+    u_long panelCount[11] = {0};
+    u_long queryCount[11] = {0};
 
 
     vector<Syllable> filter;
@@ -338,20 +338,24 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file)
             if (c == '0')
             {
                 X_[index] = X_[index] << 1;
+                ++panelCount[0];
             }
             else if (c == '1')
             {
                 X_[index] = (X_[index] << 1) | 1;
+                ++panelCount[1];
             }
             else if (c > '1' && c <= '9')
             {
                 X_[index] = (X_[index] << 1) | 1; // 多字符位点记为1
+                ++panelCount[c-'0'];
                 syllableMultis[index].push_back(
                     std::make_pair(static_cast<uint8_t>(K % B), static_cast<uint8_t>(c - '0')));
             }
             else if (c == '.')
             {
                 X_[index] = (X_[index] << 1) | 1; // 缺失值位点记为1
+                ++panelCount[10];
                 missingTemp[index] = missingTemp[index] | (one << (B - 1 - K % B));
                 panelSyllableHavingMissing[index][K / B] = true;
                 filterTemp = filterTemp | (one << (B - 1 - K % B));
