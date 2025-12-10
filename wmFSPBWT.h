@@ -1,7 +1,6 @@
 #include <chrono>
 #include<iostream>
-#include <algorithm>
-#include <array>
+
 #include <cstring>
 #include <fstream>
 #include <numeric>
@@ -303,21 +302,6 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file)
 
         if (token.size() != M)
         {
-            // ============== 新增调试代码开始 ==============
-            std::cerr << "=========== DEBUG INFO ===========" << std::endl;
-            std::cerr << "出错位置 (K): " << K << std::endl;
-            std::cerr << "完整行内容: [" << line << "]" << std::endl;
-            std::cerr << "提取的Token: [" << token << "]" << std::endl;
-            std::cerr << "Token长度: " << token.size() << " (ASCI码: ";
-            // 打印每个字符的ASCII码，防止有肉眼不可见的控制字符
-            for (char c : token)
-            {
-                std::cerr << (int)c << " ";
-            }
-            std::cerr << ")" << std::endl;
-            std::cerr << "==================================" << std::endl;
-            // ============== 新增调试代码结束 ==============
-
             std::cerr << "单倍型数据长度不匹配: 预期 " << M << ", 实际 " << token.size() << ", K=" << K << std::endl;
             return 6;
         }
@@ -359,14 +343,6 @@ int wmFSPBWT<Syllable>::readMacsPanel(string panel_file)
                 missingTemp[index] = missingTemp[index] | (one << (B - 1 - K % B));
                 panelSyllableHavingMissing[index][K / B] = true;
                 filterTemp = filterTemp | (one << (B - 1 - K % B));
-                // // ---- 调试输出 ----
-                // std::cerr << "[DEBUG] "
-                //           << "i=" << index                // 样本编号
-                //           << "  k=" << K/B              // 音节编号
-                //           << "  K=" << K                  // 全局位点编号
-                //           << "  K%B=" << K % B
-                //           << "  bit-pos=" << (B - 1 - K % B)
-                //           << std::endl;
             }
             else
             {
@@ -1842,53 +1818,6 @@ void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a,
     string idA = IDs[index_a];
     string idB = IDs[index_b];
 
-    // =============================================================
-    // 【核磁共振】直接检查 Block 3 和 Block 4 的原始数据
-    // =============================================================
-    if (IDs[index_a] == "1" && IDs[index_b] == "18")
-    {
-        std::cerr << "\n[MRI SCAN] Inspecting 1 vs 18..." << std::endl;
-
-        // 检查 Block 3 (包含位点 255)
-        int blk = 3;
-        Syllable missA = 0, missB = 0;
-        if (panelMissingData.count({index_a, blk})) missA = panelMissingData[{index_a, blk}];
-        if (panelMissingData.count({index_b, blk})) missB = panelMissingData[{index_b, blk}];
-
-        std::cerr << "Block " << blk << " (Bits 192-255):" << std::endl;
-        // 打印 LSB (位点 255) 的状态
-        std::cerr << "  Bit 255 (LSB) Missing Mask -> A: " << (missA & 1) << ", B: " << (missB & 1) << std::endl;
-
-        // 检查 Block 4 (包含位点 256-319)
-        blk = 4;
-        missA = 0;
-        missB = 0;
-        if (panelMissingData.count({index_a, blk})) missA = panelMissingData[{index_a, blk}];
-        if (panelMissingData.count({index_b, blk})) missB = panelMissingData[{index_b, blk}];
-
-        std::cerr << "Block " << blk << " (Bits 256-319):" << std::endl;
-        // 打印 MSB (位点 256) 的状态
-        // 注意：MSB 是 (1 << 63)
-        Syllable msb = ((Syllable)1) << 63;
-        std::cerr << "  Bit 256 (MSB) Missing Mask -> A: " << ((missA & msb) ? 1 : 0)
-            << ", B: " << ((missB & msb) ? 1 : 0) << std::endl;
-
-        // 检查是否有“全1”造成的幽灵缺失
-        if (missA == (Syllable)-1 || missB == (Syllable)-1)
-        {
-            std::cerr << "  [ALARM] Full Block Missing Detected! This implies logic error." << std::endl;
-        }
-    }
-    // =============================================================
-    // 如果是 Round 2 的随机数据，ID 可能是 "13" 和 "21"
-    bool debug = (idA == "1" && idB == "18") || (idA == "18" && idB == "1");
-
-    if (debug)
-    {
-        std::cerr << "\n[DEBUG Refine] START Checking " << idA << " vs " << idB << std::endl;
-        std::cerr << "  Input Params: s_idx=" << s_idx << " e_idx=" << e_idx << " L=" << L << std::endl;
-    }
-
     // ==========================================
     // 1. 计算 Start (向左)
     // ==========================================
@@ -1950,10 +1879,7 @@ void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a,
         start = (s_idx + 1) * B - suffix_len;
     }
 
-    if (debug)
-    {
-        std::cerr << "  Calculated Start: " << start << std::endl;
-    }
+
 
     // ==========================================
     // 2. 计算 End (向右贪心扫描)
@@ -1998,31 +1924,11 @@ void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a,
             {
                 end = N;
                 mismatch_found = true;
-                if (debug) std::cerr << "  -> Hit End of Genome at " << N << std::endl;
                 goto end_loop;
             }
 
             int bit_shift = B - 1 - j;
             Syllable bitMask = ((Syllable)1) << bit_shift;
-
-            // --- 诊断信息的核心 ---
-            // 我们特别关注报错位置 787 附近的情况
-            if (debug && global_pos >= 780 && global_pos <= 790)
-            {
-                std::cerr << "  [CHECK @" << global_pos << "] ";
-                int va = (X[index_a][curr_block] >> bit_shift) & 1;
-                int vb = (X[index_b][curr_block] >> bit_shift) & 1;
-                bool ma = (missA & bitMask);
-                bool mb = (missB & bitMask);
-                std::cerr << "Val: " << va << "/" << vb
-                    << " Miss: " << ma << "/" << mb;
-
-                if (ma || mb) std::cerr << " -> IGNORE (Missing)" << std::endl;
-                else if (va != vb) std::cerr << " -> MISMATCH!" << std::endl;
-                else std::cerr << " -> MATCH" << std::endl;
-            }
-            // ---------------------
-
             bool is_match = true;
             if ((missA & bitMask) || (missB & bitMask))
             {
@@ -2066,7 +1972,6 @@ void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a,
             {
                 end = global_pos;
                 mismatch_found = true;
-                if (debug) std::cerr << "  -> STOPPED at " << end << " (Mismatch)" << std::endl;
                 goto end_loop;
             }
         }
@@ -2077,11 +1982,7 @@ void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a,
 
 end_loop:;
 
-    if (debug)
-    {
-        std::cerr << "  Refine Result: [" << start << ", " << end << "]" << std::endl;
-        std::cerr << "  Outputting? " << (end - start >= L ? "YES" : "NO") << std::endl;
-    }
+
 
     if (end - start >= L)
     {
