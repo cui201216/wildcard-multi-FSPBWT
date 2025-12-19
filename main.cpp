@@ -79,38 +79,62 @@ int main(int argc, char* argv[]) {
     int queryLength         = 1800;
 
     int opt;
-    while ((opt = getopt(argc, argv, "i:o:s:q:m:B:f:l:h")) != -1) {
+    const char* const short_opts = "i:I:o:O:s:S:q:Q:m:M:b:B:f:F:l:L:h:H";
+
+
+    while ((opt = getopt(argc, argv, short_opts)) != -1) {
         switch (opt) {
-            case 'i': inputFile = optarg; break;
-            case 'o': outputFile = optarg; break;
-            case 's': statsFile = optarg; break;                // Custom stats file
-            case 'q': queryFile = optarg; break;
-            case 'm':
-                queryMode = optarg;
-                if (queryMode != "in" && queryMode != "out") {
-                    std::cerr << "Error: Query mode must be 'in' or 'out'.\n";
-                    return 1;
-                }
-                break;
-            case 'B':
-                B = std::stoi(optarg);
-                if (B != 64 && B != 128) {
-                    std::cerr << "Error: Currently only B = 64 or 128 is supported.\n";
-                    return 1;
-                }
-                break;
-            case 'f':
-                F = std::stoi(optarg);
-                if (F < 0) {
-                    std::cerr << "Error: F value must be >= 0.\n";
-                    return 1;
-                }
-                break;
-            case 'l': queryLength = std::stoi(optarg); break;
-            case 'h': printHelp(argv[0]); return 0;
-            default:
-                std::cerr << "Unknown option, use -h for help.\n";
+        case 'i': case 'I':  // 大小写合并
+            inputFile = optarg;
+            break;
+
+        case 'o': case 'O':
+            outputFile = optarg;
+            break;
+
+        case 's': case 'S':
+            statsFile = optarg;
+            break;
+
+        case 'q': case 'Q':
+            queryFile = optarg;
+            break;
+
+        case 'm': case 'M':
+            queryMode = optarg;
+            if (queryMode != "in" && queryMode != "out") {
+                std::cerr << "Error: Query mode must be 'in' or 'out'.\n";
                 return 1;
+            }
+            break;
+
+        case 'B': case 'b': // 重点：这里 B 和 b 都会进入同一个逻辑
+            B = std::stoi(optarg);
+            if (B != 64 && B != 128) {
+                std::cerr << "Error: Currently only B = 64 or 128 is supported.\n";
+                return 1;
+            }
+            break;
+
+        case 'f': case 'F':
+            F = std::stoi(optarg);
+            if (F < 0) {
+                std::cerr << "Error: F value must be >= 0.\n";
+                return 1;
+            }
+            break;
+
+        case 'l': case 'L':
+            queryLength = std::stoi(optarg);
+            break;
+
+        case 'h': case 'H':
+            printHelp(argv[0]);
+            return 0;
+
+        default:
+            std::cerr << "Unknown option, use -h for help.\n";
+            return 1;
         }
     }
 
