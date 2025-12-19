@@ -1809,6 +1809,20 @@ bool wmFSPBWT<Syllable>::outPanelSyllableEqual(int index_panel, int index_query,
     return true;
 }
 
+template <typename InfoPair, typename ValueVector>
+inline uint8_t getMultiAlleleValue(int bit_pos,
+                                   const InfoPair& info,
+                                   const ValueVector& multiValues)
+{
+    if (info.second == 0) return 1;
+    for (unsigned int i = 0; i < info.second; ++i) {
+        if (multiValues[info.first + i].first == bit_pos) {
+            return multiValues[info.first + i].second;
+        }
+    }
+    return 1;
+}
+
 template <class Syllable>
 void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a, int index_b, std::ofstream& out)
 {
@@ -1830,157 +1844,132 @@ void wmFSPBWT<Syllable>::inPanelRefine(int L, int s_idx, int e_idx, int index_a,
     {
         auto info_a = panelMultiInfo[index_a][s_idx];
         auto info_b = panelMultiInfo[index_b][s_idx];
-
+        bool hasMissing = false;
         Syllable missA = 0, missB = 0;
-        if (panelMissingData.count({index_a, s_idx})) missA = panelMissingData[{index_a, s_idx}];
-        if (panelMissingData.count({index_b, s_idx})) missB = panelMissingData[{index_b, s_idx}];
+        if (panelMissingData.count({index_a, s_idx})) {missA = panelMissingData[{index_a, s_idx}];hasMissing=true;}
+        if (panelMissingData.count({index_b, s_idx})) {missB = panelMissingData[{index_b, s_idx}];hasMissing=true;}
+        // --- [Fast Path]: 没有多等位点 且 没有缺失值 ---
+        if (!hasMissing && info_a.second == 0 && info_b.second == 0) {
+            unsigned long tz;
+            Syllable xor_val = X[index_a][s_idx] ^ X[index_b][s_idx];
 
-        int suffix_len = 0;
-        for (int j = B - 1; j >= 0; --j)
-        {
-            int bit_shift = B - 1 - j;
-            Syllable bitMask = ((Syllable)1) << bit_shift;
-
-            bool is_missing = (missA & bitMask) || (missB & bitMask);
-            int val_a = (X[index_a][s_idx] >> bit_shift) & 1;
-            int val_b = (X[index_b][s_idx] >> bit_shift) & 1;
-
-            bool is_match = true;
-            if (!is_missing)
-            {
-                if (val_a != val_b) is_match = false;
-                else if (val_a == 1)
-                {
-                    // Multi-allelic check (simplified for debug view)
-                    int ra = 1, rb = 1;
-                    if (info_a.second > 0)
-                    {
-                        for (unsigned k = 0; k < info_a.second; ++k) if (panelMultiValues[info_a.first + k].first == j)
-                        {
-                            ra = panelMultiValues[info_a.first + k].second;
-                            break;
-                        }
-                    }
-                    if (info_b.second > 0)
-                    {
-                        for (unsigned k = 0; k < info_b.second; ++k) if (panelMultiValues[info_b.first + k].first == j)
-                        {
-                            rb = panelMultiValues[info_b.first + k].second;
-                            break;
-                        }
-                    }
-                    if (ra != rb) is_match = false;
+            if (xor_val == 0) {
+                tz = B; // 整个块都匹配
+            } else {
+                if (B == 64) {
+                    tz = __builtin_ctzll(xor_val);
+                } else if (B == 128) {
+                    tz = ctz128_uint128(xor_val);
                 }
             }
-
-            if (!is_match) break;
-            suffix_len++;
+            start = (s_idx + 1) * B - tz;
         }
-        start = (s_idx + 1) * B - suffix_len;
+        else
+        {
+            int suffix_len = 0;
+            for (int j = B - 1; j >= 0; --j)
+            {
+                int bit_shift = B - 1 - j;
+                Syllable bitMask = ((Syllable)1) << bit_shift;
+
+                bool is_missing = (missA & bitMask) || (missB & bitMask);
+                int val_a = (X[index_a][s_idx] >> bit_shift) & 1;
+                int val_b = (X[index_b][s_idx] >> bit_shift) & 1;
+
+                bool is_match = true;
+                if (!is_missing)
+                {
+                    if (val_a != val_b) is_match = false;
+                    else if (val_a == 1)
+                    {
+                        // Multi-allelic check (simplified for debug view)
+                        int ra = 1, rb = 1;
+                        if (info_a.second > 0)
+                        {
+                            for (unsigned k = 0; k < info_a.second; ++k) if (panelMultiValues[info_a.first + k].first == j)
+                            {
+                                ra = panelMultiValues[info_a.first + k].second;
+                                break;
+                            }
+                        }
+                        if (info_b.second > 0)
+                        {
+                            for (unsigned k = 0; k < info_b.second; ++k) if (panelMultiValues[info_b.first + k].first == j)
+                            {
+                                rb = panelMultiValues[info_b.first + k].second;
+                                break;
+                            }
+                        }
+                        if (ra != rb) is_match = false;
+                    }
+                }
+
+                if (!is_match) break;
+                suffix_len++;
+            }
+            start = (s_idx + 1) * B - suffix_len;
+        }
     }
 
 
+    int end = 0;
 
-    // ==========================================
-    // 2. 计算 End (向右贪心扫描)
-    // ==========================================
-    int scan_pos = (e_idx == 0 && start > 0) ? start : e_idx * B;
-    // 注意：如果 identification 传进来 e_idx，通常意味着从该块开始查
-    // 但为了贪心，如果 start 已经算出来了，我们应该从 start 开始往后扫，或者至少从 start + len 开始
-    // 这里保持原来的逻辑：从 e_idx 块开始扫 (通常 e_idx * B >= start)
+    if (e_idx == n) {
+        end = N; // 已经匹配到基因组末尾
+    } else {
+        auto& info_a = panelMultiInfo[index_a][e_idx];
+        auto& info_b = panelMultiInfo[index_b][e_idx];
 
-    // 修正扫描起点：Refine 应该从 calculated start 之后开始确认，
-    // 或者简单点，既然我们支持跨块，直接从 start 开始往后扫一遍全长确认也可以。
-    // 但为了效率，我们还是从 e_idx * B 开始。
-
-    // 如果 start 算出来比如是 700，而 e_idx*B 是 704 (block 11 start)，那我们就从 704 开始往后看
-    int curr_scan_base = (e_idx * B > start) ? e_idx * B : start;
-
-    // 【关键调试区】：我们重点关注向右延伸的过程
-    int end = curr_scan_base;
-    bool mismatch_found = false;
-
-    // 计算起始块索引
-    int start_blk = curr_scan_base / B;
-    int start_bit = curr_scan_base % B;
-
-    for (int curr_block = start_blk; curr_block < n; ++curr_block)
-    {
-        auto info_a = panelMultiInfo[index_a][curr_block];
-        auto info_b = panelMultiInfo[index_b][curr_block];
-
-        Syllable missA = 0, missB = 0;
-        if (panelMissingData.count({index_a, curr_block})) missA = panelMissingData[{index_a, curr_block}];
-        if (panelMissingData.count({index_b, curr_block})) missB = panelMissingData[{index_b, curr_block}];
-
-        // 如果是第一个块，从 start_bit 开始；否则从 0 开始
-        int j_start = (curr_block == start_blk) ? start_bit : 0;
-
-        for (int j = j_start; j < B; ++j)
-        {
-            int global_pos = curr_block * B + j;
-
-            if (global_pos >= N)
-            {
-                end = N;
-                mismatch_found = true;
-                goto end_loop;
-            }
-
-            int bit_shift = B - 1 - j;
-            Syllable bitMask = ((Syllable)1) << bit_shift;
-            bool is_match = true;
-            if ((missA & bitMask) || (missB & bitMask))
-            {
-                // Match (Missing)
-            }
-            else
-            {
-                int val_a = (X[index_a][curr_block] >> bit_shift) & 1;
-                int val_b = (X[index_b][curr_block] >> bit_shift) & 1;
-
-                if (val_a != val_b)
-                {
-                    is_match = false;
-                }
-                else if (val_a == 1)
-                {
-                    int real_a = 1, real_b = 1;
-                    if (info_a.second > 0)
-                    {
-                        for (unsigned k = 0; k < info_a.second; ++k)
-                            if (panelMultiValues[info_a.first + k].first == j)
-                            {
-                                real_a = panelMultiValues[info_a.first + k].second;
-                                break;
-                            }
-                    }
-                    if (info_b.second > 0)
-                    {
-                        for (unsigned k = 0; k < info_b.second; ++k)
-                            if (panelMultiValues[info_b.first + k].first == j)
-                            {
-                                real_b = panelMultiValues[info_b.first + k].second;
-                                break;
-                            }
-                    }
-                    if (real_a != real_b) is_match = false;
-                }
-            }
-
-            if (!is_match)
-            {
-                end = global_pos;
-                mismatch_found = true;
-                goto end_loop;
-            }
+        bool hasMissing = false;
+        if (!panelMissingData.empty()) {
+            if (panelMissingData.count({index_a, e_idx}) || panelMissingData.count({index_b, e_idx})) hasMissing = true;
         }
-        end = (curr_block + 1) * B;
+
+        // [Fast Path]
+        if (!hasMissing && info_a.second == 0 && info_b.second == 0) {
+            Syllable diff = X[index_a][e_idx] ^ X[index_b][e_idx];
+            unsigned long lz = 0;
+            // 理论上 diff 不会为 0，因为 Identification 在这里停下了
+            // 但如果为 0，说明这个块也是匹配的（边界情况），lz = B
+            if (diff == 0) lz = B;
+            else if (B == 64) lz = __builtin_clzll(diff);
+            else if (B == 128) lz = clz128_uint128(diff);
+
+            end = e_idx * B + lz;
+        }
+        // [Slow Path]
+        else {
+            Syllable missA = 0, missB = 0;
+            if (hasMissing) {
+                if (panelMissingData.count({index_a, e_idx})) missA = panelMissingData[{index_a, e_idx}];
+                if (panelMissingData.count({index_b, e_idx})) missB = panelMissingData[{index_b, e_idx}];
+            }
+
+            int match_len = 0;
+            for (int j = 0; j < B; ++j) {
+                int global_pos = e_idx * B + j;
+                if (global_pos >= N) break;
+
+                int bit_shift = B - 1 - j;
+                Syllable bitMask = ((Syllable)1) << bit_shift;
+
+                if ((missA & bitMask) || (missB & bitMask)) { match_len++; continue; }
+
+                int val_a = (X[index_a][e_idx] >> bit_shift) & 1;
+                int val_b = (X[index_b][e_idx] >> bit_shift) & 1;
+
+                if (val_a != val_b) break; // Mismatch found
+                if (val_a == 1) {
+                    uint8_t ra = getMultiAlleleValue(j, info_a, panelMultiValues);
+                    uint8_t rb = getMultiAlleleValue(j, info_b, panelMultiValues);
+                    if (ra != rb) break;
+                }
+                match_len++;
+            }
+            end = e_idx * B + match_len;
+        }
     }
 
-    if (!mismatch_found && end > N) end = N;
-
-end_loop:;
 
 
 
@@ -1993,201 +1982,125 @@ end_loop:;
 }
 
 template <class Syllable>
-void wmFSPBWT<Syllable>::outPanelRefine(int L, int s_idx, int e_idx, int index_panel, int index_query,
-                                        std::ofstream& out)
+void wmFSPBWT<Syllable>::outPanelRefine(int L, int s_idx, int e_idx, int index_panel, int index_query, std::ofstream& out)
 {
     // ==========================================
-    // 1. 计算 Start (向左延伸)
+    // 1. 计算 Start
     // ==========================================
     int start = 0;
-    if (s_idx == -1)
-    {
+    if (s_idx == -1) {
         start = 0;
-    }
-    else
-    {
-        // 获取当前块的多等位信息
-        auto info_p = panelMultiInfo[index_panel][s_idx];
-        auto info_q = queryMultiInfo[index_query][s_idx]; // Query 使用 queryMultiInfo
+    } else {
+        auto& info_p = panelMultiInfo[index_panel][s_idx];
+        auto& info_q = queryMultiInfo[index_query][s_idx];
 
-        // 获取缺失数据掩码
-        Syllable missP = 0, missQ = 0;
-        if (panelMissingData.count({index_panel, s_idx})) missP = panelMissingData[{index_panel, s_idx}];
-        if (queryMissingData.count({index_query, s_idx})) missQ = queryMissingData[{index_query, s_idx}];
-        // Query 使用 queryMissingData
-
-        int suffix_len = 0;
-        for (int j = B - 1; j >= 0; --j)
-        {
-            int bit_shift = B - 1 - j;
-            Syllable bitMask = ((Syllable)1) << bit_shift;
-
-            // 检查缺失值 (Panel 或 Query 任意一方缺失即视为匹配)
-            bool is_missing = (missP & bitMask) || (missQ & bitMask);
-
-            // 获取二进制值 (Panel 用 X, Query 用 Z)
-            int val_p = (X[index_panel][s_idx] >> bit_shift) & 1;
-            int val_q = (Z[index_query][s_idx] >> bit_shift) & 1;
-
-            bool is_match = true;
-            if (!is_missing)
-            {
-                if (val_p != val_q)
-                {
-                    is_match = false;
-                }
-                else if (val_p == 1)
-                {
-                    // 多等位位点检查 (值为1时，检查具体是哪个等位基因)
-                    int real_p = 1, real_q = 1;
-
-                    // Panel 检查
-                    if (info_p.second > 0)
-                    {
-                        for (unsigned k = 0; k < info_p.second; ++k)
-                        {
-                            if (panelMultiValues[info_p.first + k].first == j)
-                            {
-                                real_p = panelMultiValues[info_p.first + k].second;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Query 检查 (使用 queryMultiValues)
-                    if (info_q.second > 0)
-                    {
-                        for (unsigned k = 0; k < info_q.second; ++k)
-                        {
-                            if (queryMultiValues[info_q.first + k].first == j)
-                            {
-                                real_q = queryMultiValues[info_q.first + k].second;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (real_p != real_q) is_match = false;
-                }
-            }
-
-            if (!is_match) break;
-            suffix_len++;
+        bool hasMissing = false;
+        if (!panelMissingData.empty() || !queryMissingData.empty()) {
+            if (panelMissingData.count({index_panel, s_idx}) || queryMissingData.count({index_query, s_idx})) hasMissing = true;
         }
-        start = (s_idx + 1) * B - suffix_len;
-    }
 
+        // [Fast Path]
+        if (!hasMissing && info_p.second == 0 && info_q.second == 0) {
+            Syllable diff = X[index_panel][s_idx] ^ Z[index_query][s_idx];
+            unsigned long tz = 0;
+            if (diff == 0) tz = B;
+            else if (B == 64) tz = __builtin_ctzll(diff);
+            else if (B == 128) tz = ctz128_uint128(diff);
 
-    // ==========================================
-    // 2. 计算 End (向右贪心扫描)
-    // ==========================================
-    // 逻辑与 inPanel 保持完全一致：从计算出的 start 或 e_idx 开始扫描
-    int curr_scan_base = (e_idx * B > start) ? e_idx * B : start;
-
-    int end = curr_scan_base;
-    bool mismatch_found = false;
-
-    int start_blk = curr_scan_base / B;
-    int start_bit = curr_scan_base % B;
-
-    for (int curr_block = start_blk; curr_block < n; ++curr_block)
-    {
-        auto info_p = panelMultiInfo[index_panel][curr_block];
-        auto info_q = queryMultiInfo[index_query][curr_block];
-
-        Syllable missP = 0, missQ = 0;
-        if (panelMissingData.count({index_panel, curr_block})) missP = panelMissingData[{index_panel, curr_block}];
-        if (queryMissingData.count({index_query, curr_block})) missQ = queryMissingData[{index_query, curr_block}];
-
-        // 如果是起始块，从 start_bit 开始；否则从 0 开始
-        int j_start = (curr_block == start_blk) ? start_bit : 0;
-
-        for (int j = j_start; j < B; ++j)
-        {
-            int global_pos = curr_block * B + j;
-
-            if (global_pos >= N)
-            {
-                end = N;
-                mismatch_found = true;
-                goto end_loop;
-            }
-
-            int bit_shift = B - 1 - j;
-            Syllable bitMask = ((Syllable)1) << bit_shift;
-
-
-            bool is_match = true;
-            if ((missP & bitMask) || (missQ & bitMask))
-            {
-                // Match (Missing)
-            }
-            else
-            {
-                int val_p = (X[index_panel][curr_block] >> bit_shift) & 1;
-                int val_q = (Z[index_query][curr_block] >> bit_shift) & 1;
-
-                if (val_p != val_q)
-                {
-                    is_match = false;
-                }
-                else if (val_p == 1)
-                {
-                    int real_p = 1, real_q = 1;
-
-                    // Panel 检查
-                    if (info_p.second > 0)
-                    {
-                        for (unsigned k = 0; k < info_p.second; ++k)
-                            if (panelMultiValues[info_p.first + k].first == j)
-                            {
-                                real_p = panelMultiValues[info_p.first + k].second;
-                                break;
-                            }
-                    }
-
-                    // Query 检查
-                    if (info_q.second > 0)
-                    {
-                        for (unsigned k = 0; k < info_q.second; ++k)
-                            if (queryMultiValues[info_q.first + k].first == j)
-                            {
-                                real_q = queryMultiValues[info_q.first + k].second;
-                                break;
-                            }
-                    }
-
-                    if (real_p != real_q) is_match = false;
-                }
-            }
-
-            if (!is_match)
-            {
-                end = global_pos;
-                mismatch_found = true;
-                goto end_loop;
-            }
+            start = (s_idx + 1) * B - tz;
         }
-        end = (curr_block + 1) * B;
+        // [Slow Path]
+        else {
+            int suffix_len = 0;
+            Syllable missP = 0, missQ = 0;
+            if (hasMissing) {
+                if (panelMissingData.count({index_panel, s_idx})) missP = panelMissingData[{index_panel, s_idx}];
+                if (queryMissingData.count({index_query, s_idx})) missQ = queryMissingData[{index_query, s_idx}];
+            }
+            for (int j = B - 1; j >= 0; --j) {
+                int bit_shift = B - 1 - j;
+                Syllable bitMask = ((Syllable)1) << bit_shift;
+
+                if ((missP & bitMask) || (missQ & bitMask)) { suffix_len++; continue; }
+
+                int val_p = (X[index_panel][s_idx] >> bit_shift) & 1;
+                int val_q = (Z[index_query][s_idx] >> bit_shift) & 1;
+
+                if (val_p != val_q) break;
+                if (val_p == 1) {
+                    uint8_t rp = getMultiAlleleValue(j, info_p, panelMultiValues);
+                    uint8_t rq = getMultiAlleleValue(j, info_q, queryMultiValues);
+                    if (rp != rq) break;
+                }
+                suffix_len++;
+            }
+            start = (s_idx + 1) * B - suffix_len;
+        }
     }
 
-    if (!mismatch_found && end > N) end = N;
-
-end_loop:;
-
-
     // ==========================================
-    // 3. 输出与统计
+    // 2. 计算 End (只看 e_idx)
     // ==========================================
-    if (end - start >= L)
-    {
-        // 注意：这里 Query 使用 qIDs
+    int end = 0;
+    if (e_idx == n) {
+        end = N;
+    } else {
+        auto& info_p = panelMultiInfo[index_panel][e_idx];
+        auto& info_q = queryMultiInfo[index_query][e_idx];
+
+        bool hasMissing = false;
+        if (!panelMissingData.empty() || !queryMissingData.empty()) {
+            if (panelMissingData.count({index_panel, e_idx}) || queryMissingData.count({index_query, e_idx})) hasMissing = true;
+        }
+
+        // [Fast Path]
+        if (!hasMissing && info_p.second == 0 && info_q.second == 0) {
+            Syllable diff = X[index_panel][e_idx] ^ Z[index_query][e_idx];
+            unsigned long lz = 0;
+            if (diff == 0) lz = B; // 理论不应发生，除非 logic bug 或 e_idx 越界
+            else if (B == 64) lz = __builtin_clzll(diff);
+            else if (B == 128) lz = clz128_uint128(diff);
+
+            end = e_idx * B + lz;
+        }
+        // [Slow Path]
+        else {
+            Syllable missP = 0, missQ = 0;
+            if (hasMissing) {
+                if (panelMissingData.count({index_panel, e_idx})) missP = panelMissingData[{index_panel, e_idx}];
+                if (queryMissingData.count({index_query, e_idx})) missQ = queryMissingData[{index_query, e_idx}];
+            }
+            int match_len = 0;
+            for (int j = 0; j < B; ++j) {
+                int global_pos = e_idx * B + j;
+                if (global_pos >= N) break;
+
+                int bit_shift = B - 1 - j;
+                Syllable bitMask = ((Syllable)1) << bit_shift;
+
+                if ((missP & bitMask) || (missQ & bitMask)) { match_len++; continue; }
+
+                int val_p = (X[index_panel][e_idx] >> bit_shift) & 1;
+                int val_q = (Z[index_query][e_idx] >> bit_shift) & 1;
+
+                if (val_p != val_q) break;
+                if (val_p == 1) {
+                    uint8_t rp = getMultiAlleleValue(j, info_p, panelMultiValues);
+                    uint8_t rq = getMultiAlleleValue(j, info_q, queryMultiValues);
+                    if (rp != rq) break;
+                }
+                match_len++;
+            }
+            end = e_idx * B + match_len;
+        }
+    }
+
+    if (end - start >= L) {
         out << IDs[index_panel] << '\t' << qIDs[index_query] << '\t' << start << '\t' << end - 1 << '\n';
-        ++outPanelMatchNum; // 更新 Panel 外匹配计数
+        ++outPanelMatchNum;
         matchLen += (end - start);
     }
 }
-
 template <class Syllable>
 void wmFSPBWT<Syllable>::inPanelIdentification(int L, int s_idx, int e_idx, int index_a,
                                                int index_b, std::ofstream& out)
