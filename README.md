@@ -23,7 +23,7 @@
 
 * **C++ 编译器:** 支持 C++17 标准 (如 GCC 7+, Clang 5+)
 * **CMake:** 版本 >= 3.28
-* **操作系统:** Linux / Unix (推荐，因为涉及到 HPC 和 Shell 脚本)
+* **操作系统:** Linux  (推荐Ubuntu)
 
 ### 编译步骤
 
@@ -38,7 +38,7 @@ mkdir build && cd build
 # 3. 生成构建文件
 cmake ..
 
-# 4. 编译 (将生成 wild-multiFSPBWT 和 wild-multiFSPBWT_test)
+# 4. 编译 (将生成 wild-multiFSPBWT)
 make -j4
 
 ```
