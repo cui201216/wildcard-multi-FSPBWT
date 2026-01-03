@@ -92,6 +92,11 @@ struct wmFSPBWT
     vector<vector<bool>> querySyllableHavingMissing;
     std::unordered_map<std::pair<int, int>, Syllable> panelMissingData;
     std::unordered_map<std::pair<int, int>, Syllable> queryMissingData;
+
+    int readVcfPanel(string panel_file);
+
+    int readVcfQuery(string query_file);
+
     int readMacsPanel(string txt_file);
 
     int readMacsQuery(string txt_file);
@@ -122,7 +127,322 @@ struct wmFSPBWT
     void outputInformationToFile(const std::string& fileName, string mode);
 };
 
+template <class Syllable>
+int wmFSPBWT<Syllable>::readVcfPanel(string panel_file)
+{
+    clock_t start, end;
+    start = clock();
 
+    // 使用 C 风格 IO 提速
+    FILE* fp = fopen(panel_file.c_str(), "r");
+    if (!fp) return 1;
+
+    char* buffer = new char[1024 * 1024]; // 1MB 行缓存，足够大
+    size_t buf_size = 1024 * 1024;
+
+    // 1. 跳过 Meta headers (##)
+    long data_start_pos = 0;
+    while (getline(&buffer, &buf_size, fp) != -1) {
+        if (buffer[0] != '#' || buffer[1] != '#') {
+            break; // 读到了 #CHROM 行
+        }
+    }
+
+    // 2. 解析 Header (#CHROM) 计算样本数
+    // 逻辑：计算第9个tab后面的列数
+    int tab_count = 0;
+    char* ptr = buffer;
+    while (*ptr) {
+        if (*ptr == '\t') tab_count++;
+        ptr++;
+    }
+    int sample_count = tab_count - 8; // 前9列是Header，后面是样本
+    if (sample_count < 1) return 2;
+    M = sample_count * 2; // VCF 默认双单倍型
+
+    // 3. 计算行数 (N)
+    data_start_pos = ftell(fp); // 记录数据开始位置
+    N = 0;
+    // 快速过一遍文件数行数
+    while (getline(&buffer, &buf_size, fp) != -1) {
+        if (buffer[0] != '#') N++; // 简单判断
+    }
+    if (N < 1) return 2;
+
+    n = (N + B - 1) / B;
+
+    // 4. 初始化结构
+    try {
+        IDs.resize(M);
+        for(int i=0; i<M; ++i) IDs[i] = to_string(i); // 简化ID
+        physLocs.resize(N);
+        X.resize(M, vector<Syllable>(n));
+
+        panelMultiInfo.resize(M, vector<pair<unsigned int, uint8_t>>(n, make_pair(-1, 0)));
+        array.resize(n + 1, vector<int>(M));
+        divergence.resize(n + 1, vector<int>(M, 0));
+        u = new int[(long)n * M * T];
+        filter.resize(n, 0);
+        panelSyllableHavingMissing.resize(M, vector<bool>(n, false));
+
+        iota(array[0].begin(), array[0].end(), 0);
+    } catch (...) { return -1; }
+
+    // 重置文件指针
+    fseek(fp, data_start_pos, SEEK_SET);
+
+    vector<Syllable> X_(M, 0);
+    vector<vector<pair<uint8_t, uint8_t>>> syllableMultis(M);
+    vector<Syllable> missingTemp(M, 0);
+    Syllable filterTemp = 0;
+    Syllable one = 1;
+
+    // 5. 极速读取循环
+    for (int K = 0, k = 0; K < N; K++)
+    {
+        if (getline(&buffer, &buf_size, fp) == -1) break;
+
+        k = K / B;
+
+        // --- Block 保存逻辑 (保持不变) ---
+        if (K % B == 0 && K != 0) {
+            int prev_k = k - 1;
+            for (int i = 0; i < M; i++) {
+                X[i][prev_k] = X_[i];
+                if (!syllableMultis[i].empty()) {
+                    unsigned int start_idx = panelMultiValues.size();
+                    for (const auto& p : syllableMultis[i]) panelMultiValues.push_back(p);
+                    panelMultiInfo[i][prev_k] = make_pair(start_idx, (uint8_t)syllableMultis[i].size());
+                    syllableMultis[i].clear();
+                } else {
+                    panelMultiInfo[i][prev_k] = make_pair(-1, 0);
+                }
+                if (panelSyllableHavingMissing[i][prev_k]) {
+                    panelMissingData[{i, prev_k}] = missingTemp[i];
+                }
+            }
+            filter[prev_k] |= filterTemp;
+            fill(X_.begin(), X_.end(), 0);
+            fill(missingTemp.begin(), missingTemp.end(), 0);
+            filterTemp = 0;
+        }
+
+        // --- 核心解析逻辑：跳过前9列，然后只认字符 ---
+        char* p = buffer;
+        int tabs = 0;
+
+        // 快速跳过前9列，顺便抓取 POS (第2列，索引1)
+        while (tabs < 9 && *p) {
+            if (tabs == 1) { // POS列
+                physLocs[K] = atoi(p); // 读数字
+                // 移动指针直到下一个 tab
+                while (*p && *p != '\t') p++;
+                if (*p == '\t') { tabs++; p++; continue; }
+            }
+            if (*p == '\t') tabs++;
+            p++;
+        }
+
+        // 扫描基因型
+        int index = 0;
+        while (*p && *p != '\n' && index < M) {
+            char c = *p;
+
+            if (c >= '0' && c <= '9') {
+                // 处理数字位点
+                int val = c - '0';
+                if (val == 0) {
+                    X_[index] = X_[index] << 1;
+                    panelCount[0]++;
+                } else if (val == 1) {
+                    X_[index] = (X_[index] << 1) | 1;
+                    panelCount[1]++;
+                } else {
+                    // val > 1 (2-9)
+                    X_[index] = (X_[index] << 1) | 1; // 模糊化为1
+                    panelCount[val]++;
+                    syllableMultis[index].push_back(make_pair((uint8_t)(K % B), (uint8_t)val));
+                }
+                index++;
+            }
+            else if (c == '.') {
+                // 处理缺失值
+                X_[index] = (X_[index] << 1) | 1; // 模糊化为1
+                panelCount[10]++;
+                missingTemp[index] |= (one << (B - 1 - K % B));
+                panelSyllableHavingMissing[index][k] = true;
+                filterTemp |= (one << (B - 1 - K % B));
+                index++;
+            }
+            // 其他字符 (| / \t :) 全部忽略
+            p++;
+        }
+
+        // --- 最后一个 Block 填充 (保持不变) ---
+        if (K == N - 1) {
+            int pad2 = n * B - N;
+            for (int i = 0; i < M; i++) {
+                if (pad2 > 0) X_[i] <<= pad2;
+                X[i][k] = X_[i];
+                if (!syllableMultis[i].empty()) {
+                    unsigned int start_idx = panelMultiValues.size();
+                    for (const auto& kv : syllableMultis[i]) panelMultiValues.push_back(kv);
+                    panelMultiInfo[i][k] = make_pair(start_idx, (uint8_t)syllableMultis[i].size());
+                } else {
+                    panelMultiInfo[i][k] = make_pair(-1, 0);
+                }
+                if (panelSyllableHavingMissing[i][k]) {
+                    panelMissingData[{i, k}] = missingTemp[i];
+                }
+            }
+            filter[k] |= filterTemp;
+        }
+    }
+
+    free(buffer);
+    fclose(fp);
+    panelMultiValues.shrink_to_fit();
+    end = clock();
+    readPanelTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+    return 0;
+}
+
+template <class Syllable>
+int wmFSPBWT<Syllable>::readVcfQuery(string query_file)
+{
+    clock_t start, end;
+    start = clock();
+
+    FILE* fp = fopen(query_file.c_str(), "r");
+    if (!fp) return 1;
+
+    char* buffer = new char[1024 * 1024];
+    size_t buf_size = 1024 * 1024;
+
+    // 1. Skip Headers
+    while (getline(&buffer, &buf_size, fp) != -1) {
+        if (buffer[0] != '#' || buffer[1] != '#') break;
+    }
+
+    // 2. Count Samples
+    int tab_count = 0;
+    char* ptr = buffer;
+    while (*ptr) {
+        if (*ptr == '\t') tab_count++;
+        ptr++;
+    }
+    int sample_count = tab_count - 8;
+    if (sample_count < 1) return 2;
+    Q = sample_count * 2;
+
+    // 3. Init
+    try {
+        qIDs.resize(Q);
+        for(int i=0; i<Q; ++i) qIDs[i] = "Q" + to_string(i);
+        Z.resize(Q, vector<Syllable>(n));
+        queryMultiInfo.resize(Q, vector<pair<unsigned int, uint8_t>>(n, make_pair(-1, 0)));
+        querySyllableHavingMissing.resize(Q, vector<bool>(n, false));
+    } catch (...) { return -1; }
+
+    long data_pos = ftell(fp); // 数据开始处
+
+    vector<Syllable> Z_(Q, 0);
+    vector<vector<pair<uint8_t, uint8_t>>> syllableMultis(Q);
+    vector<Syllable> missingTemp(Q, 0);
+    Syllable one = 1;
+
+    // 4. 读取数据
+    for (int K = 0, k = 0; K < N; K++)
+    {
+        if (getline(&buffer, &buf_size, fp) == -1) break;
+        k = K / B;
+
+        // Block处理
+        if (K % B == 0 && K != 0) {
+            int prev_k = k - 1;
+            for (int i = 0; i < Q; i++) {
+                Z[i][prev_k] = Z_[i];
+                if (!syllableMultis[i].empty()) {
+                    unsigned int start_idx = queryMultiValues.size();
+                    for (const auto& p : syllableMultis[i]) queryMultiValues.push_back(p);
+                    queryMultiInfo[i][prev_k] = make_pair(start_idx, (uint8_t)syllableMultis[i].size());
+                    syllableMultis[i].clear();
+                } else {
+                    queryMultiInfo[i][prev_k] = make_pair(-1, 0);
+                }
+                if (missingTemp[i] != 0) {
+                    queryMissingData[{i, prev_k}] = missingTemp[i];
+                    filter[prev_k] |= missingTemp[i];
+                }
+            }
+            fill(Z_.begin(), Z_.end(), 0);
+            fill(missingTemp.begin(), missingTemp.end(), 0);
+        }
+
+        // 解析逻辑：跳过前9列，扫描字符
+        char* p = buffer;
+        int tabs = 0;
+        // 快速跳9个Tab
+        while (tabs < 9 && *p) {
+            if (*p == '\t') tabs++;
+            p++;
+        }
+
+        int index = 0;
+        while (*p && *p != '\n' && index < Q) {
+            char c = *p;
+            if (c >= '0' && c <= '9') {
+                int val = c - '0';
+                if (val == 0) {
+                    Z_[index] = Z_[index] << 1;
+                    queryCount[0]++;
+                } else if (val == 1) {
+                    Z_[index] = (Z_[index] << 1) | 1;
+                    queryCount[1]++;
+                } else { // 2-9
+                    Z_[index] = (Z_[index] << 1) | 1;
+                    queryCount[val]++;
+                    syllableMultis[index].push_back(make_pair((uint8_t)(K % B), (uint8_t)val));
+                }
+                index++;
+            } else if (c == '.') {
+                Z_[index] = (Z_[index] << 1) | 1;
+                queryCount[10]++;
+                missingTemp[index] |= (one << (B - 1 - K % B));
+                querySyllableHavingMissing[index][k] = true;
+                index++;
+            }
+            p++;
+        }
+
+        // 最后一个Block
+        if (K == N - 1) {
+            int pad2 = n * B - N;
+            for (int i = 0; i < Q; i++) {
+                if (pad2 > 0) Z_[i] <<= pad2;
+                Z[i][k] = Z_[i];
+                if (!syllableMultis[i].empty()) {
+                    unsigned int start_idx = queryMultiValues.size();
+                    for (const auto& kv : syllableMultis[i]) queryMultiValues.push_back(kv);
+                    queryMultiInfo[i][k] = make_pair(start_idx, (uint8_t)syllableMultis[i].size());
+                } else {
+                    queryMultiInfo[i][k] = make_pair(-1, 0);
+                }
+                if (querySyllableHavingMissing[i][k]) {
+                    queryMissingData[{i, k}] = missingTemp[i];
+                    filter[k] |= missingTemp[i];
+                }
+            }
+        }
+    }
+
+    free(buffer);
+    fclose(fp);
+    queryMultiValues.shrink_to_fit();
+    end = clock();
+    readQueryTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+    return 0;
+}
 template <class Syllable>
 int wmFSPBWT<Syllable>::readMacsPanel(string panel_file)
 {
