@@ -83,7 +83,7 @@ int main(int argc, char* argv[]) {
     bool isMacs             = false; // 默认是 false，即默认为 VCF
 
     int opt;
-    const char* const short_opts = "i:I:o:O:s:S:q:Q:m:M:b:B:f:F:l:L:h:H";
+    const char* const short_opts = "i:I:o:O:s:S:q:Q:m:M:b:B:f:F:l:L:hH";
 
     // 定义长参数，映射到内部字符 'x' (因为 'm' 已经被 queryMode 占用了)
     static struct option long_options[] = {
