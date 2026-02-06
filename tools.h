@@ -17,8 +17,31 @@
 using namespace std;
 
 
-
-
+template<typename T>
+void saveVector(std::ofstream& out, const std::vector<T>& vec) {
+    size_t sz = vec.size();
+    out.write(reinterpret_cast<const char*>(&sz), sizeof(sz));
+    if (sz > 0) {
+        out.write(reinterpret_cast<const char*>(vec.data()), sz * sizeof(T));
+    }
+}
+template<typename T>
+static void saveNestedVector(std::ofstream& out, const std::vector<std::vector<T>>& nested) {
+    size_t outer_sz = nested.size();
+    out.write(reinterpret_cast<const char*>(&outer_sz), sizeof(outer_sz));
+    for (const auto& inner : nested) {
+        saveVector(out, inner);
+    }
+}
+template<typename T>
+static void loadVector(std::ifstream& in, std::vector<T>& vec) {
+    size_t sz;
+    in.read(reinterpret_cast<char*>(&sz), sizeof(sz));
+    vec.resize(sz);
+    if (sz > 0) {
+        in.read(reinterpret_cast<char*>(vec.data()), sz * sizeof(T));
+    }
+}
 int ctz128_uint128(__uint128_t num) {
     uint64_t low_bits = num;
     uint64_t high_bits = num >> 64;

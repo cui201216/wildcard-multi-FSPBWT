@@ -125,6 +125,9 @@ struct wmFSPBWT
                                 int index_query, ofstream& out);
 
     void outputInformationToFile(const std::string& fileName, string mode);
+
+    void save(const string& index_file);
+    void load(const string& index_file);
 };
 
 template <class Syllable>
@@ -2604,4 +2607,279 @@ void wmFSPBWT<Syllable>::outputInformationToFile(const std::string& fileName, st
         std::cerr << "Unable to open file " << fileName << " for writing."
             << std::endl;
     }
+}
+template <class Syllable>
+void wmFSPBWT<Syllable>::save(const string& index_file)
+{
+    std::ofstream out(index_file, std::ios::binary);
+    if (!out.is_open()) {
+        throw std::runtime_error("无法打开索引文件进行写入: " + index_file);
+    }
+    uint64_t magic = 0x574D4650'42425400ULL;  // "WMFSPBWT\0"
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+
+    uint32_t sz_size = sizeof(size_t);
+    uint32_t syl_size = sizeof(Syllable);
+    out.write(reinterpret_cast<const char*>(&sz_size), sizeof(sz_size));
+    out.write(reinterpret_cast<const char*>(&syl_size), sizeof(syl_size));
+    // 1. 保存基本标量成员
+    out.write(reinterpret_cast<const char*>(&B), sizeof(B));
+    out.write(reinterpret_cast<const char*>(&F), sizeof(F));
+    out.write(reinterpret_cast<const char*>(&T), sizeof(T));
+    out.write(reinterpret_cast<const char*>(&M), sizeof(M));
+    out.write(reinterpret_cast<const char*>(&N), sizeof(N));
+    out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+    out.write(reinterpret_cast<const char*>(&minSiteL), sizeof(minSiteL));
+
+    // 2. 保存 IDs (vector<string>)
+    size_t ids_size = IDs.size();
+    out.write(reinterpret_cast<const char*>(&ids_size), sizeof(ids_size));
+    for (const auto& id : IDs) {
+        size_t len = id.length();
+        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        out.write(id.c_str(), len);
+    }
+
+    // 3. 保存 physLocs (vector<int>)
+    saveVector(out, physLocs);
+
+    // 4. 保存 X (vector<vector<Syllable>>)
+    saveNestedVector(out, X);
+
+    // 5. 保存 fuzzyX (vector<vector<uint32_t>>)
+    saveNestedVector(out, fuzzyX);
+
+    // 6. 保存 array (vector<vector<int>>)
+    saveNestedVector(out, array);
+
+    // 7. 保存 divergence (vector<vector<int>>)
+    saveNestedVector(out, divergence);
+
+    // 8. 保存 filter (vector<Syllable>)
+    saveVector(out, filter);
+
+    // 9. 保存 panelSyllableHavingMissing (vector<vector<bool>>)
+    {
+        size_t outer = panelSyllableHavingMissing.size();
+        out.write(reinterpret_cast<const char*>(&outer), sizeof(outer));
+        for (const auto& inner : panelSyllableHavingMissing) {
+            size_t inner_sz = inner.size();
+            out.write(reinterpret_cast<const char*>(&inner_sz), sizeof(inner_sz));
+            for (bool b : inner) {
+                out.write(reinterpret_cast<const char*>(&b), sizeof(bool));
+            }
+        }
+    }
+
+    // 10. 保存 panelMultiInfo (vector<vector<pair<unsigned int, uint8_t>>>)
+    saveNestedVector(out, panelMultiInfo);
+
+    // 11. 保存 panelMultiValues (vector<pair<uint8_t, uint8_t>>)
+    saveVector(out, panelMultiValues);
+
+    // 12. 保存 panelMissingData (unordered_map<pair<int,int>, Syllable>)
+    size_t missing_size = panelMissingData.size();
+    out.write(reinterpret_cast<const char*>(&missing_size), sizeof(missing_size));
+    for (const auto& [key, value] : panelMissingData) {
+        out.write(reinterpret_cast<const char*>(&key.first), sizeof(key.first));
+        out.write(reinterpret_cast<const char*>(&key.second), sizeof(key.second));
+        out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    }
+
+    // 13. 保存 u (int* 动态数组)
+    size_t u_total_size = static_cast<size_t>(n) * M * T;
+    out.write(reinterpret_cast<const char*>(&u_total_size), sizeof(u_total_size));
+    if (u_total_size > 0 && u != nullptr) {
+        out.write(reinterpret_cast<const char*>(u), u_total_size * sizeof(int));
+    }
+
+    // 14. 保存 panelCount (固定大小数组 u_long panelCount[11])
+    out.write(reinterpret_cast<const char*>(panelCount), sizeof(panelCount));
+
+    // 注意：这里没有保存 query 相关的成员（Z, fuzzyZ, queryMulti* 等），因为 save 只用于 panel 索引
+
+    out.close();
+
+    if (!out.good()) {
+        throw std::runtime_error("写入索引文件时发生错误: " + index_file);
+    }
+
+    std::cout << "索引已成功保存到: " << index_file << std::endl;
+}
+template <class Syllable>
+void wmFSPBWT<Syllable>::load(const std::string& index_file) {
+    std::ifstream in(index_file, std::ios::binary);
+    if (!in.is_open()) {
+        throw std::runtime_error("无法打开索引文件进行读取: " + index_file);
+    }
+
+
+    // 读取 magic number 和版本信息（建议在 save 中也添加对应写入）
+    uint64_t magic;
+    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    if (!in.good()) throw std::runtime_error("读取 magic number 失败");
+    if (magic != 0x574D4650'42425400ULL) {  // "WMFSPBWT\0"
+        throw std::runtime_error("无效的索引文件格式（magic number 不匹配）");
+    }
+    std::cout << "[DEBUG] Magic number 校验通过" << std::endl;
+
+    // 标量字段
+    in.read(reinterpret_cast<char*>(&B), sizeof(B));
+    if (!in.good()) throw std::runtime_error("读取 B 失败");
+
+
+    in.read(reinterpret_cast<char*>(&F), sizeof(F));
+
+
+    in.read(reinterpret_cast<char*>(&T), sizeof(T));
+
+
+    in.read(reinterpret_cast<char*>(&M), sizeof(M));
+
+
+    in.read(reinterpret_cast<char*>(&N), sizeof(N));
+
+
+    in.read(reinterpret_cast<char*>(&n), sizeof(n));
+
+
+    in.read(reinterpret_cast<char*>(&minSiteL), sizeof(minSiteL));
+
+
+    // IDs (vector<string>)
+    size_t ids_sz;
+    in.read(reinterpret_cast<char*>(&ids_sz), sizeof(ids_sz));
+    if (!in.good()) throw std::runtime_error("读取 IDs size 失败");
+
+
+    IDs.resize(ids_sz);
+    for (size_t i = 0; i < ids_sz; ++i) {
+        size_t len;
+        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        if (!in.good()) throw std::runtime_error("读取 ID[" + std::to_string(i) + "] length 失败");
+        IDs[i].resize(len);
+        if (len > 0) {
+            in.read(&IDs[i][0], len);
+            if (!in.good()) throw std::runtime_error("读取 ID[" + std::to_string(i) + "] data 失败");
+        }
+    }
+
+    // physLocs (vector<int>)
+    size_t phys_sz;
+    in.read(reinterpret_cast<char*>(&phys_sz), sizeof(phys_sz));
+    if (!in.good()) throw std::runtime_error("读取 physLocs size 失败");
+
+    physLocs.resize(phys_sz);
+    if (phys_sz > 0) {
+        in.read(reinterpret_cast<char*>(physLocs.data()), phys_sz * sizeof(int));
+        if (!in.good()) throw std::runtime_error("读取 physLocs data 失败");
+    }
+
+    // X (vector<vector<Syllable>>)
+    size_t x_outer;
+    in.read(reinterpret_cast<char*>(&x_outer), sizeof(x_outer));
+    if (!in.good()) throw std::runtime_error("读取 X outer size 失败");
+
+    X.resize(x_outer);
+    for (auto& row : X) {
+        loadVector(in, row);
+    }
+
+    // fuzzyX
+    size_t fuzzy_outer;
+    in.read(reinterpret_cast<char*>(&fuzzy_outer), sizeof(fuzzy_outer));
+    if (!in.good()) throw std::runtime_error("读取 fuzzyX outer size 失败");
+
+    fuzzyX.resize(fuzzy_outer);
+    for (auto& row : fuzzyX) {
+        loadVector(in, row);
+    }
+
+    // array
+    size_t array_outer;
+    in.read(reinterpret_cast<char*>(&array_outer), sizeof(array_outer));
+    if (!in.good()) throw std::runtime_error("读取 array outer size 失败");
+    array.resize(array_outer);
+    for (auto& row : array) {
+        loadVector(in, row);
+    }
+
+    // divergence
+    size_t div_outer;
+    in.read(reinterpret_cast<char*>(&div_outer), sizeof(div_outer));
+    if (!in.good()) throw std::runtime_error("读取 divergence outer size 失败");
+    divergence.resize(div_outer);
+    for (auto& row : divergence) {
+        loadVector(in, row);
+    }
+
+    // filter
+    loadVector(in, filter);
+
+    // panelSyllableHavingMissing (vector<vector<bool>>)
+    size_t outer_sz;
+    in.read(reinterpret_cast<char*>(&outer_sz), sizeof(outer_sz));
+    if (!in.good()) throw std::runtime_error("读取 panelSyllableHavingMissing outer size 失败");
+    panelSyllableHavingMissing.resize(outer_sz);
+    for (auto& inner : panelSyllableHavingMissing) {
+        size_t inner_sz;
+        in.read(reinterpret_cast<char*>(&inner_sz), sizeof(inner_sz));
+        if (!in.good()) throw std::runtime_error("读取 inner size 失败");
+        inner.resize(inner_sz);
+        for (size_t i = 0; i < inner_sz; ++i) {
+            bool value;
+            in.read(reinterpret_cast<char*>(&value), sizeof(bool));
+            if (!in.good()) throw std::runtime_error("读取 bool 值失败");
+            inner[i] = value;
+        }
+    }
+
+    // panelMultiInfo
+    size_t multiinfo_outer;
+    in.read(reinterpret_cast<char*>(&multiinfo_outer), sizeof(multiinfo_outer));
+    panelMultiInfo.resize(multiinfo_outer);
+    for (auto& row : panelMultiInfo) {
+        loadVector(in, row);
+    }
+
+    // panelMultiValues
+    loadVector(in, panelMultiValues);
+
+    // panelMissingData
+    size_t missing_sz;
+    in.read(reinterpret_cast<char*>(&missing_sz), sizeof(missing_sz));
+    if (!in.good()) throw std::runtime_error("读取 panelMissingData size 失败");
+    panelMissingData.clear();
+    for (size_t i = 0; i < missing_sz; ++i) {
+        std::pair<int, int> key;
+        Syllable val;
+        in.read(reinterpret_cast<char*>(&key.first), sizeof(key.first));
+        in.read(reinterpret_cast<char*>(&key.second), sizeof(key.second));
+        in.read(reinterpret_cast<char*>(&val), sizeof(val));
+        if (!in.good()) throw std::runtime_error("读取 panelMissingData 条目失败");
+        panelMissingData[key] = val;
+    }
+
+    // u (动态数组)
+    size_t u_sz;
+    in.read(reinterpret_cast<char*>(&u_sz), sizeof(u_sz));
+    if (!in.good()) throw std::runtime_error("读取 u size 失败");
+
+
+    if (u) delete[] u;
+    u = new int[u_sz];
+    if (u_sz > 0) {
+        in.read(reinterpret_cast<char*>(u), u_sz * sizeof(int));
+        if (!in.good()) throw std::runtime_error("读取 u data 失败");
+    }
+
+    // panelCount
+    in.read(reinterpret_cast<char*>(panelCount), sizeof(panelCount));
+    if (!in.good()) throw std::runtime_error("读取 panelCount 失败");
+
+    in.close();
+    if (!in.good()) {
+        throw std::runtime_error("读取索引文件时发生错误（文件可能被截断）");
+    }
+    std::cout << "索引加载成功: " << index_file << std::endl;
 }

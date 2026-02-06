@@ -1,5 +1,5 @@
 #include "wmFSPBWT.h"
-#include <getopt.h> // getopt_long
+#include <getopt.h>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -10,267 +10,279 @@
 using namespace std;
 
 void printHelp(const char* programName) {
-    std::cout << "Usage: " << programName << " [options]\n"
-              << "  -i <file>     Input panel file (default: panel)\n"
-              << "  -o <file>     Output file (default: <input>.out)\n"
-              << "  -s <file>     Statistics info file (default: <output>.inf, customizable)\n"
-              << "  -q <file>     External query sequence file (required for out-panel mode)\n"
-              << "  -m <in/out>   Query mode: 'in' (in-panel, default) or 'out' (out-panel)\n"
-              << "  -B <int>      Block size B (default: 64, supports 64 or 128)\n"
-              << "  -f <int>      F value (default: 1, supports 1,2,3,4)\n"
-              << "  -l <int>      Query length L (default: 1800, must be > 2*B-2)\n"
-              << "  --macs        Input format is MACS (default: VCF)\n" // 新增参数说明
-              << "  -h            Show this help message\n\n"
-              << "Examples:\n"
-              << "  " << programName << " -i data.vcf -o result.out -l 2000    # Default VCF mode\n"
-              << "  " << programName << " -i data.macs --macs -m out -q query.macs # Explicit MACS mode\n";
-}
-
-bool validateFiles(const std::string& inputFile, const std::string& outputFile,
-                   const std::string& statsFile, const std::string& queryFile,
-                   const std::string& queryMode) {
-    // Input panel file
-    {
-        std::ifstream in(inputFile);
-        if (!in.good()) {
-            std::cerr << "Error: Input panel file '" << inputFile << "' does not exist or cannot be read.\n";
-            return false;
-        }
-    }
-
-    // Output file writability
-    {
-        std::ofstream out(outputFile, std::ios::app);
-        if (!out.good()) {
-            std::cerr << "Error: Cannot write to output file '" << outputFile << "'.\n";
-            return false;
-        }
-    }
-
-    // Stats file writability
-    if (!statsFile.empty()) {
-        std::ofstream sout(statsFile, std::ios::app);
-        if (!sout.good()) {
-            std::cerr << "Error: Cannot write to statistics file '" << statsFile << "'.\n";
-            return false;
-        }
-    }
-
-    // Query file for out-panel mode
-    if (queryMode == "out") {
-        if (queryFile.empty()) {
-            std::cerr << "Error: Out-panel query mode (-m out) requires a query file (-q).\n";
-            return false;
-        }
-        std::ifstream qf(queryFile);
-        if (!qf.good()) {
-            std::cerr << "Error: Query file '" << queryFile << "' does not exist or cannot be read.\n";
-            return false;
-        }
-    }
-    return true;
+    cout << "Usage: " << programName << " [command] [options]\n\n";
+    cout << "Commands:\n";
+    cout << "  (no command)          Traditional mode: read panel, build index in memory, query directly\n";
+    cout << "  build                 Build index and save to file\n";
+    cout << "  self                  Load index and perform in-panel (self) query\n";
+    cout << "  query                 Load index and perform out-panel query\n\n";
+    cout << "Options (common):\n";
+    cout << "  -i <file>             Input panel file (traditional/build) or index file (self/query)\n";
+    cout << "  -o <file>             Output file (query result) or index file (build)\n";
+    cout << "  -q <file>             Query file (only for out-panel / query mode)\n";
+    cout << "  -m <in|out>           Query mode: 'in' or 'out' (traditional mode only)\n";
+    cout << "  -l <int>              Minimum match length L (default: 1800)\n";
+    cout << "  -B <64|128>           Block size B (default: 64)\n";
+    cout << "  -f <1-4>              F value (default: 1)\n";
+    cout << "  --macs                Input file is in MACS format\n";
+    cout << "  -h                    Show this help\n\n";
+    cout << "Examples:\n";
+    cout << "  " << programName << " -i panel.vcf -m in -l 2000\n";
+    cout << "  " << programName << " build -i panel.vcf -o panel.idx --macs -B 128 -f 2\n";
+    cout << "  " << programName << " self -i panel.idx -o result.in.txt -l 1800\n";
+    cout << "  " << programName << " query -i panel.idx -q query.vcf -o result.out.txt -l 1800\n";
 }
 
 int main(int argc, char* argv[]) {
-    std::string inputFile   = "panel";
-    std::string outputFile  = "";
-    std::string statsFile   = "";
-    std::string queryFile   = "";
-    std::string queryMode   = "in";
-    int B                   = 64;
-    int F                   = 1;
-    int queryLength         = 1800;
-    bool isMacs             = false; // 默认是 false，即默认为 VCF
+    if (argc < 2) {
+        printHelp(argv[0]);
+        return 1;
+    }
 
+    string command;
+    string panelFile, indexFile, queryFile, outputFile;
+    string queryMode = "in";
+    int B = 64;
+    int F = 1;
+    int L = 1800;
+    bool isMacs = false;
+
+    // 如果第一个参数不是选项（不是以 - 开头），则认为是子命令
+    if (argv[1][0] != '-') {
+        command = argv[1];
+        optind = 2;  // 从第三个参数开始解析选项
+    } else {
+        command = "";  // 传统模式
+        optind = 1;
+    }
+
+    // 统一选项解析
     int opt;
-    const char* const short_opts = "i:I:o:O:s:S:q:Q:m:M:b:B:f:F:l:L:hH";
-
-    // 定义长参数，映射到内部字符 'x' (因为 'm' 已经被 queryMode 占用了)
+    const char* short_opts = "i:o:q:m:l:B:f:h";
     static struct option long_options[] = {
         {"macs", no_argument, 0, 'x'},
         {0, 0, 0, 0}
     };
-
     int option_index = 0;
-    // 使用 getopt_long 解析参数
+
     while ((opt = getopt_long(argc, argv, short_opts, long_options, &option_index)) != -1) {
         switch (opt) {
-        case 'i': case 'I':
-            inputFile = optarg;
-            break;
-
-        case 'o': case 'O':
-            outputFile = optarg;
-            break;
-
-        case 's': case 'S':
-            statsFile = optarg;
-            break;
-
-        case 'q': case 'Q':
-            queryFile = optarg;
-            break;
-
-        case 'm': case 'M':
-            queryMode = optarg;
-            if (queryMode != "in" && queryMode != "out") {
-                std::cerr << "Error: Query mode must be 'in' or 'out'.\n";
+            case 'i': panelFile = optarg; break;
+            case 'o': outputFile = optarg; break;
+            case 'q': queryFile = optarg; break;
+            case 'm':
+                queryMode = optarg;
+                if (queryMode != "in" && queryMode != "out") {
+                    cerr << "Error: -m must be 'in' or 'out'\n";
+                    return 1;
+                }
+                break;
+            case 'l': L = stoi(optarg); break;
+            case 'B': B = stoi(optarg); break;
+            case 'f': F = stoi(optarg); break;
+            case 'x': isMacs = true; break;
+            case 'h': printHelp(argv[0]); return 0;
+            default:
+                cerr << "Unknown option\n";
+                printHelp(argv[0]);
                 return 1;
-            }
-            break;
-
-        case 'B': case 'b':
-            B = std::stoi(optarg);
-            if (B != 64 && B != 128) {
-                std::cerr << "Error: Currently only B = 64 or 128 is supported.\n";
-                return 1;
-            }
-            break;
-
-        case 'f': case 'F':
-            F = std::stoi(optarg);
-            if (F < 0) {
-                std::cerr << "Error: F value must be >= 0.\n";
-                return 1;
-            }
-            break;
-
-        case 'l': case 'L':
-            queryLength = std::stoi(optarg);
-            break;
-
-        case 'x': // 处理 --macs 参数
-            isMacs = true;
-            break;
-
-        case 'h': case 'H':
-            printHelp(argv[0]);
-            return 0;
-
-        default:
-            std::cerr << "Unknown option, use -h for help.\n";
-            return 1;
         }
     }
 
-    // Auto-generate filenames
-    if (outputFile.empty()) {
-        outputFile = inputFile + ".out";
-    }
-    if (statsFile.empty()) {
-        statsFile = outputFile + ".inf";
-    }
-
-    // Parameter validity check
-    if (queryLength < 2 * B - 1) {
-        std::cerr << "Error: Query length L must be strictly greater than 2*B-2 (Current 2*B = " << 2 * B << ", L = " << queryLength << ").\n";
-        return 1;
-    }
-
-    if (!validateFiles(inputFile, outputFile, statsFile, queryFile, queryMode)) {
+    // 参数校验
+    if (L < 2 * B - 1) {
+        cerr << "Error: L must be > 2*B-2\n";
         return 1;
     }
 
     int ret = 0;
 
-    // --- 核心逻辑：默认为 VCF，只有 isMacs 为 true 时才读取 MACS ---
-
+    // 根据 B 选择 Syllable 类型
     if (B == 64) {
         wmFSPBWT<unsigned long long> CRY;
-        CRY.F = F;
         CRY.B = B;
-        CRY.T = std::pow(2, F);
+        CRY.F = F;
+        CRY.T = (int)pow(2, F);
         CRY.minSiteL = B * 2 - 1;
 
-        // 1. 读取 Panel
-        if (isMacs) {
-            std::cout << "[Info] Reading Panel (MACS)...\n";
-            ret = CRY.readMacsPanel(inputFile);
-        } else {
-            std::cout << "[Info] Reading Panel (VCF)...\n";
-            ret = CRY.readVcfPanel(inputFile);
-        }
-
-        std::cout << "Panel reading completed: " << ret << "\n";
-        if (ret != 0) return ret;
-
-        // 2. 构建 Index
-        ret = CRY.makePanel();
-        std::cout << "Fuzzy panel generation: " << ret << "\n";
-        if (ret != 0) return ret;
-
-        // 3. 查询
-        if (queryMode == "in") {
-            ret = CRY.inPanelLongMatchQuery(queryLength, outputFile);
-            std::cout << "In-panel query completed: " << ret << "\n";
-        } else {
-            // 读取 Query
-            if (isMacs) {
-                 std::cout << "[Info] Reading Query (MACS)...\n";
-                 ret = CRY.readMacsQuery(queryFile);
-            } else {
-                 std::cout << "[Info] Reading Query (VCF)...\n";
-                 ret = CRY.readVcfQuery(queryFile);
+        if (command == "build") {
+            // build 模式：读面板 → 构建 → 保存索引
+            if (panelFile.empty() || outputFile.empty()) {
+                cerr << "build requires -i <panel> -o <index>\n";
+                return 1;
             }
-
-            std::cout << "Query sequence reading completed: " << ret << "\n";
+            cout << "[Build] Reading panel...\n";
+            if (isMacs) ret = CRY.readMacsPanel(panelFile);
+            else ret = CRY.readVcfPanel(panelFile);
             if (ret != 0) return ret;
 
-            ret = CRY.outPanelLongMatchQuery(queryLength, outputFile);
-            std::cout << "Out-panel query completed: " << ret << "\n";
+            cout << "[Build] Making fuzzy panel...\n";
+            ret = CRY.makePanel();
+            if (ret != 0) return ret;
+
+            cout << "[Build] Saving index to " << outputFile << "\n";
+            CRY.save(outputFile);
+            cout << "Index built and saved successfully.\n";
         }
+        else if (command == "self" || command == "query") {
+            // self / query 模式：加载索引 → 执行查询
+            if (panelFile.empty() || outputFile.empty()) {
+                cerr << command << " requires -i <index> -o <output>\n";
+                return 1;
+            }
+            cout << "[Load] Loading index from " << panelFile << "\n";
+            CRY.load(panelFile);
 
-        CRY.outputInformationToFile(statsFile, queryMode);
+            if (command == "self") {
+                cout << "[Query] Performing in-panel (self) query...\n";
+                ret = CRY.inPanelLongMatchQuery(L, outputFile);
+            } else {  // query
+                if (queryFile.empty()) {
+                    cerr << "query requires -q <query_file>\n";
+                    return 1;
+                }
+                cout << "[Query] Reading query file...\n";
+                if (isMacs) ret = CRY.readMacsQuery(queryFile);
+                else ret = CRY.readVcfQuery(queryFile);
+                if (ret != 0) return ret;
 
-    } else if (B == 128) {
+                cout << "[Query] Performing out-panel query...\n";
+                ret = CRY.outPanelLongMatchQuery(L, outputFile);
+            }
+            if (ret == 0) {
+                cout << "Query completed. Results saved to " << outputFile << "\n";
+            }
+        }
+        else {
+            // 传统模式（无 command）
+            if (panelFile.empty()) {
+                cerr << "No input panel specified (-i)\n";
+                return 1;
+            }
+            cout << "[Traditional] Reading panel...\n";
+            if (isMacs) ret = CRY.readMacsPanel(panelFile);
+            else ret = CRY.readVcfPanel(panelFile);
+            if (ret != 0) return ret;
+
+            cout << "[Traditional] Making fuzzy panel...\n";
+            ret = CRY.makePanel();
+            if (ret != 0) return ret;
+
+            if (queryMode == "in") {
+                cout << "[Traditional] Performing in-panel query...\n";
+                ret = CRY.inPanelLongMatchQuery(L, outputFile.empty() ? panelFile + ".out" : outputFile);
+            } else {
+                if (queryFile.empty()) {
+                    cerr << "Out-panel mode requires -q <query_file>\n";
+                    return 1;
+                }
+                cout << "[Traditional] Reading query...\n";
+                if (isMacs) ret = CRY.readMacsQuery(queryFile);
+                else ret = CRY.readVcfQuery(queryFile);
+                if (ret != 0) return ret;
+
+                cout << "[Traditional] Performing out-panel query...\n";
+                ret = CRY.outPanelLongMatchQuery(L, outputFile.empty() ? panelFile + ".out" : outputFile);
+            }
+        }
+    }
+    else if (B == 128) {
+        // 完全相同的逻辑，但使用 __uint128_t
         wmFSPBWT<__uint128_t> CRY;
-        CRY.F = F;
         CRY.B = B;
-        CRY.T = std::pow(2, F);
+        CRY.F = F;
+        CRY.T = (int)pow(2, F);
         CRY.minSiteL = B * 2 - 1;
 
-        // 1. 读取 Panel
-        if (isMacs) {
-            std::cout << "[Info] Reading Panel (MACS)...\n";
-            ret = CRY.readMacsPanel(inputFile);
-        } else {
-            std::cout << "[Info] Reading Panel (VCF)...\n";
-            ret = CRY.readVcfPanel(inputFile);
-        }
-
-        std::cout << "Panel reading completed: " << ret << "\n";
-        if (ret != 0) return ret;
-
-        // 2. 构建 Index
-        ret = CRY.makePanel();
-        std::cout << "Fuzzy panel generation: " << ret << "\n";
-        if (ret != 0) return ret;
-
-        // 3. 查询
-        if (queryMode == "in") {
-            ret = CRY.inPanelLongMatchQuery(queryLength, outputFile);
-            std::cout << "In-panel query completed: " << ret << "\n";
-        } else {
-            // 读取 Query
-            if (isMacs) {
-                 std::cout << "[Info] Reading Query (MACS)...\n";
-                 ret = CRY.readMacsQuery(queryFile);
-            } else {
-                 std::cout << "[Info] Reading Query (VCF)...\n";
-                 ret = CRY.readVcfQuery(queryFile);
+          if (command == "build") {
+            // build 模式：读面板 → 构建 → 保存索引
+            if (panelFile.empty() || outputFile.empty()) {
+                cerr << "build requires -i <panel> -o <index>\n";
+                return 1;
             }
-
-            std::cout << "Query sequence reading completed: " << ret << "\n";
+            cout << "[Build] Reading panel...\n";
+            if (isMacs) ret = CRY.readMacsPanel(panelFile);
+            else ret = CRY.readVcfPanel(panelFile);
             if (ret != 0) return ret;
 
-            ret = CRY.outPanelLongMatchQuery(queryLength, outputFile);
-            std::cout << "Out-panel query completed: " << ret << "\n";
-        }
+            cout << "[Build] Making fuzzy panel...\n";
+            ret = CRY.makePanel();
+            if (ret != 0) return ret;
 
-        CRY.outputInformationToFile(statsFile, queryMode);
+            cout << "[Build] Saving index to " << outputFile << "\n";
+            CRY.save(outputFile);
+            cout << "Index built and saved successfully.\n";
+        }
+        else if (command == "self" || command == "query") {
+            // self / query 模式：加载索引 → 执行查询
+            if (panelFile.empty() || outputFile.empty()) {
+                cerr << command << " requires -i <index> -o <output>\n";
+                return 1;
+            }
+            cout << "[Load] Loading index from " << panelFile << "\n";
+            CRY.load(panelFile);
+
+            if (command == "self") {
+                cout << "[Query] Performing in-panel (self) query...\n";
+                ret = CRY.inPanelLongMatchQuery(L, outputFile);
+            } else {  // query
+                if (queryFile.empty()) {
+                    cerr << "query requires -q <query_file>\n";
+                    return 1;
+                }
+                cout << "[Query] Reading query file...\n";
+                if (isMacs) ret = CRY.readMacsQuery(queryFile);
+                else ret = CRY.readVcfQuery(queryFile);
+                if (ret != 0) return ret;
+
+                cout << "[Query] Performing out-panel query...\n";
+                ret = CRY.outPanelLongMatchQuery(L, outputFile);
+            }
+            if (ret == 0) {
+                cout << "Query completed. Results saved to " << outputFile << "\n";
+            }
+        }
+        else {
+            // 传统模式（无 command）
+            if (panelFile.empty()) {
+                cerr << "No input panel specified (-i)\n";
+                return 1;
+            }
+            cout << "[Traditional] Reading panel...\n";
+            if (isMacs) ret = CRY.readMacsPanel(panelFile);
+            else ret = CRY.readVcfPanel(panelFile);
+            if (ret != 0) return ret;
+
+            cout << "[Traditional] Making fuzzy panel...\n";
+            ret = CRY.makePanel();
+            if (ret != 0) return ret;
+
+            if (queryMode == "in") {
+                cout << "[Traditional] Performing in-panel query...\n";
+                ret = CRY.inPanelLongMatchQuery(L, outputFile.empty() ? panelFile + ".out" : outputFile);
+            } else {
+                if (queryFile.empty()) {
+                    cerr << "Out-panel mode requires -q <query_file>\n";
+                    return 1;
+                }
+                cout << "[Traditional] Reading query...\n";
+                if (isMacs) ret = CRY.readMacsQuery(queryFile);
+                else ret = CRY.readVcfQuery(queryFile);
+                if (ret != 0) return ret;
+
+                cout << "[Traditional] Performing out-panel query...\n";
+                ret = CRY.outPanelLongMatchQuery(L, outputFile.empty() ? panelFile + ".out" : outputFile);
+            }
+        }
+    }
+    else {
+        cerr << "Unsupported B value: " << B << "\n";
+        return 1;
     }
 
-    std::cout << "Query results saved to: " << outputFile << "\n";
-    std::cout << "Statistics info saved to: " << statsFile << "\n";
-    return 0;
+    if (ret != 0) {
+        cerr << "Operation failed with code: " << ret << endl;
+    }
+
+    return ret;
 }
