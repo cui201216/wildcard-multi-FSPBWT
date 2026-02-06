@@ -2722,7 +2722,10 @@ void wmFSPBWT<Syllable>::load(const std::string& index_file) {
         throw std::runtime_error("无效的索引文件格式（magic number 不匹配）");
     }
     std::cout << "[DEBUG] Magic number 校验通过" << std::endl;
-
+    uint32_t stored_sz_size;
+    uint32_t stored_syl_size;
+    in.read(reinterpret_cast<char*>(&stored_sz_size), sizeof(stored_sz_size));
+    in.read(reinterpret_cast<char*>(&stored_syl_size), sizeof(stored_syl_size));
     // 标量字段
     in.read(reinterpret_cast<char*>(&B), sizeof(B));
     if (!in.good()) throw std::runtime_error("读取 B 失败");
